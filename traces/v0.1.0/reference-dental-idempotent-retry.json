@@ -1,0 +1,190 @@
+{
+  "osbp_trace_version": "0.1.0",
+  "name": "reference-dental-idempotent-retry",
+  "source": "credential-free synthetic reference backend",
+  "clock": "2026-07-01T09:00:00.000Z",
+  "redaction": "No redaction required: all ids, names, domains, and contact values are synthetic.",
+  "scenario": {
+    "id": "reference.dental.idempotent_retry",
+    "title": "Dental booking retry returns the same receipt",
+    "claim": "OSBP can safely retry a booking.create request with the same idempotency_key without creating a duplicate booking, and rejects changed payloads that reuse the key.",
+    "business_type": "dental_clinic",
+    "modality": "in_person",
+    "region": {
+      "country": "US",
+      "currency": "USD",
+      "timezone": "America/New_York"
+    },
+    "intent": "Retry a dental cleaning booking after a transport uncertainty.",
+    "user_request": "Retry the dental cleaning booking after a transport uncertainty. The agent sends the same booking request again, and the idempotency_key makes the retry replay the original booking instead of creating another appointment.",
+    "organization_id": "org_01jz7ay6r8dd6yskkpt8rvhk8z",
+    "organization_name": "Carolyn's Dental",
+    "expected": {
+      "happy_path": "same_receipt_replayed",
+      "guardrails": [
+        "idempotency_conflict"
+      ]
+    }
+  },
+  "idempotency": {
+    "key": "idempotency-reference-dental-cleaning-create",
+    "summary": "same key replayed booking bk_01jz7f2szt8h7q6m5n4p3r2v9k; changed payload rejected"
+  },
+  "steps": [
+    {
+      "step": 1,
+      "tool": "booking.create",
+      "input": {
+        "mandate": {
+          "id": "mandate_8f44d4ab-8c56-4f6d-9e0f-d5d3e2d36f88",
+          "expires_at": "2026-07-02T09:00:00.000Z",
+          "allowed_actions": [
+            "booking.create"
+          ],
+          "organization_id": "org_01jz7ay6r8dd6yskkpt8rvhk8z",
+          "service_ids": [
+            "dental_cleaning"
+          ],
+          "provider_ids": [
+            "dental_dr_lee"
+          ],
+          "schedule_ids": [
+            "dental_midtown"
+          ],
+          "earliest_start": "2026-07-07T09:00:00",
+          "latest_end": "2026-07-07T09:45:00",
+          "max_price": {
+            "amount_minor": 15000,
+            "currency": "USD"
+          },
+          "allow_policy_fee": false,
+          "max_extra_fee": {
+            "amount_minor": 0,
+            "currency": "USD"
+          }
+        },
+        "idempotency_key": "idempotency-reference-dental-cleaning-create",
+        "service_id": "dental_cleaning",
+        "schedule_id": "dental_midtown",
+        "provider_id": "dental_dr_lee",
+        "date": "2026-07-07",
+        "time": "09:00",
+        "customer": {
+          "id": "cus_01jz7eg2v8y0fq3k9q9m7t8n2a",
+          "display_name": "Alex Smith"
+        }
+      },
+      "result": {
+        "ok": true,
+        "value": {
+          "id": "rcpt_01jz7f2szt8h7q6m5n4p3r2v9k",
+          "booking_id": "bk_01jz7f2szt8h7q6m5n4p3r2v9k"
+        }
+      }
+    },
+    {
+      "step": 2,
+      "tool": "booking.create",
+      "input": {
+        "mandate": {
+          "id": "mandate_8f44d4ab-8c56-4f6d-9e0f-d5d3e2d36f88",
+          "expires_at": "2026-07-02T09:00:00.000Z",
+          "allowed_actions": [
+            "booking.create"
+          ],
+          "organization_id": "org_01jz7ay6r8dd6yskkpt8rvhk8z",
+          "service_ids": [
+            "dental_cleaning"
+          ],
+          "provider_ids": [
+            "dental_dr_lee"
+          ],
+          "schedule_ids": [
+            "dental_midtown"
+          ],
+          "earliest_start": "2026-07-07T09:00:00",
+          "latest_end": "2026-07-07T09:45:00",
+          "max_price": {
+            "amount_minor": 15000,
+            "currency": "USD"
+          },
+          "allow_policy_fee": false,
+          "max_extra_fee": {
+            "amount_minor": 0,
+            "currency": "USD"
+          }
+        },
+        "idempotency_key": "idempotency-reference-dental-cleaning-create",
+        "service_id": "dental_cleaning",
+        "schedule_id": "dental_midtown",
+        "provider_id": "dental_dr_lee",
+        "date": "2026-07-07",
+        "time": "09:00",
+        "customer": {
+          "id": "cus_01jz7eg2v8y0fq3k9q9m7t8n2a",
+          "display_name": "Alex Smith"
+        }
+      },
+      "result": {
+        "ok": true,
+        "value": {
+          "id": "rcpt_01jz7f2szt8h7q6m5n4p3r2v9k",
+          "booking_id": "bk_01jz7f2szt8h7q6m5n4p3r2v9k"
+        }
+      }
+    },
+    {
+      "step": 3,
+      "tool": "booking.create",
+      "input": {
+        "mandate": {
+          "id": "mandate_8f44d4ab-8c56-4f6d-9e0f-d5d3e2d36f88",
+          "expires_at": "2026-07-02T09:00:00.000Z",
+          "allowed_actions": [
+            "booking.create"
+          ],
+          "organization_id": "org_01jz7ay6r8dd6yskkpt8rvhk8z",
+          "service_ids": [
+            "dental_cleaning"
+          ],
+          "provider_ids": [
+            "dental_dr_lee"
+          ],
+          "schedule_ids": [
+            "dental_midtown"
+          ],
+          "earliest_start": "2026-07-07T09:00:00",
+          "latest_end": "2026-07-07T09:45:00",
+          "max_price": {
+            "amount_minor": 15000,
+            "currency": "USD"
+          },
+          "allow_policy_fee": false,
+          "max_extra_fee": {
+            "amount_minor": 0,
+            "currency": "USD"
+          }
+        },
+        "idempotency_key": "idempotency-reference-dental-cleaning-create",
+        "service_id": "dental_cleaning",
+        "schedule_id": "dental_midtown",
+        "provider_id": "dental_dr_lee",
+        "date": "2026-07-07",
+        "time": "10:30",
+        "customer": {
+          "id": "cus_01jz7eg2v8y0fq3k9q9m7t8n2a",
+          "display_name": "Alex Smith"
+        }
+      },
+      "result": {
+        "ok": false,
+        "problem": {
+          "code": "idempotency_conflict",
+          "message": "idempotency_key was reused with a different booking payload",
+          "retryable": false
+        }
+      },
+      "platform_write": false
+    }
+  ]
+}

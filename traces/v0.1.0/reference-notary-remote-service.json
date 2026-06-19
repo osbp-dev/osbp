@@ -1,0 +1,189 @@
+{
+  "osbp_trace_version": "0.1.0",
+  "name": "reference-notary-remote-service",
+  "source": "credential-free synthetic reference backend",
+  "clock": "2026-07-01T09:00:00.000Z",
+  "redaction": "No redaction required: all ids, names, domains, and contact values are synthetic.",
+  "scenario": {
+    "id": "reference.notary.remote_service",
+    "title": "Remote notarization booked without a street address",
+    "claim": "OSBP can book a remote service schedule without requiring a physical street address.",
+    "business_type": "notary",
+    "modality": "remote",
+    "region": {
+      "country": "US",
+      "currency": "USD",
+      "timezone": "America/New_York"
+    },
+    "intent": "Book an online document notarization, up to $25.00.",
+    "user_request": "Book an online document notarization, up to $25.00. The agent selects Maya Chen at 09:00 on the online schedule, and the BookingMandate records a remote slot without a street address.",
+    "organization_id": "org_01jz7gmphxn33ertpvvx9y3yfh",
+    "organization_name": "Gus' Notary",
+    "selection": {
+      "organization_id": "org_01jz7gmphxn33ertpvvx9y3yfh",
+      "organization_name": "Gus' Notary",
+      "service_id": "notary_document",
+      "service_name": "Document notarization",
+      "schedule_id": "notary_online",
+      "schedule_name": "Online (remote notarization)",
+      "provider_id": "notary_chen",
+      "provider_name": "Maya Chen, Notary Public",
+      "date": "2026-07-07",
+      "time": "09:00"
+    },
+    "expected": {
+      "happy_path": "booking_created",
+      "guardrails": []
+    }
+  },
+  "steps": [
+    {
+      "step": 1,
+      "tool": "service.describe",
+      "input": {
+        "service_id": "notary_document"
+      },
+      "result": {
+        "ok": true,
+        "value": {
+          "id": "notary_document",
+          "name": "Document notarization",
+          "duration": "PT20M",
+          "price": {
+            "amount_minor": 1500,
+            "currency": "USD",
+            "type": "fixed",
+            "display": "$15.00"
+          }
+        }
+      }
+    },
+    {
+      "step": 2,
+      "tool": "availability.find",
+      "input": {
+        "service_id": "notary_document",
+        "schedule_id": "notary_online",
+        "provider_id": "notary_chen",
+        "date": "2026-07-07"
+      },
+      "result": {
+        "ok": true,
+        "value": [
+          {
+            "id": "notary_online:notary_chen:notary_document:2026-07-07T09:00:00",
+            "organization_id": "org_01jz7gmphxn33ertpvvx9y3yfh",
+            "organization_name": "Gus' Notary",
+            "service_id": "notary_document",
+            "schedule_id": "notary_online",
+            "schedule_name": "Online (remote notarization)",
+            "schedule_timezone": "America/New_York",
+            "provider_id": "notary_chen",
+            "provider_name": "Maya Chen, Notary Public",
+            "starts_at": "2026-07-07T13:00:00.000Z",
+            "ends_at": "2026-07-07T13:20:00.000Z",
+            "starts_at_local": "2026-07-07T09:00:00",
+            "ends_at_local": "2026-07-07T09:20:00",
+            "price": {
+              "amount_minor": 1500,
+              "currency": "USD",
+              "type": "fixed",
+              "display": "$15.00"
+            }
+          }
+        ]
+      },
+      "assert_absent": [
+        "value.0.schedule_address",
+        "value.0.schedule_latitude",
+        "value.0.schedule_longitude"
+      ]
+    },
+    {
+      "step": 3,
+      "tool": "policy.explain",
+      "input": {
+        "service_id": "notary_document"
+      },
+      "result": {
+        "ok": true,
+        "value": {
+          "service_id": "notary_document",
+          "payment_requirement": "none",
+          "verification_method": "none"
+        }
+      }
+    },
+    {
+      "step": 4,
+      "tool": "booking.create",
+      "input": {
+        "mandate": {
+          "id": "mandate_9e081929-3903-44f8-a9a6-0bb1f9243444",
+          "expires_at": "2026-07-02T09:00:00.000Z",
+          "allowed_actions": [
+            "booking.create"
+          ],
+          "organization_id": "org_01jz7gmphxn33ertpvvx9y3yfh",
+          "service_ids": [
+            "notary_document"
+          ],
+          "provider_ids": [
+            "notary_chen"
+          ],
+          "schedule_ids": [
+            "notary_online"
+          ],
+          "earliest_start": "2026-07-07T09:00:00",
+          "latest_end": "2026-07-07T09:20:00",
+          "max_price": {
+            "amount_minor": 2500,
+            "currency": "USD"
+          },
+          "allow_policy_fee": false,
+          "max_extra_fee": {
+            "amount_minor": 0,
+            "currency": "USD"
+          }
+        },
+        "idempotency_key": "idempotency-reference-notary-remote",
+        "service_id": "notary_document",
+        "schedule_id": "notary_online",
+        "provider_id": "notary_chen",
+        "date": "2026-07-07",
+        "time": "09:00",
+        "customer": {
+          "id": "cus_01jz7ekq7dm0ybs0gz9ws3y4g8",
+          "display_name": "Alex Smith"
+        }
+      },
+      "result": {
+        "ok": true,
+        "value": {
+          "id": "rcpt_01jz7f65htw3yn9kc4s2mb8r7q",
+          "booking_id": "bk_01jz7f65htw3yn9kc4s2mb8r7q"
+        }
+      }
+    },
+    {
+      "step": 5,
+      "tool": "booking.status",
+      "input": {
+        "booking_id": "bk_01jz7f65htw3yn9kc4s2mb8r7q"
+      },
+      "result": {
+        "ok": true,
+        "value": {
+          "id": "bk_01jz7f65htw3yn9kc4s2mb8r7q",
+          "service_id": "notary_document",
+          "schedule_id": "notary_online",
+          "provider_id": "notary_chen",
+          "status": "booked",
+          "starts_at": "2026-07-07T13:00:00.000Z",
+          "starts_at_local": "2026-07-07T09:00:00",
+          "schedule_timezone": "America/New_York"
+        }
+      }
+    }
+  ]
+}

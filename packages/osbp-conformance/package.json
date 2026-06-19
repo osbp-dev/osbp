@@ -1,0 +1,27 @@
+{
+  "name": "@osbp/conformance",
+  "version": "0.1.0",
+  "type": "module",
+  "private": true,
+  "bin": {
+    "osbp-conformance": "./dist/cli.js"
+  },
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "default": "./dist/index.js"
+    }
+  },
+  "dependencies": {
+    "@osbp/core": "0.1.0"
+  },
+  "devDependencies": {
+    "@osbp/reference-backend": "0.1.0"
+  },
+  "scripts": {
+    "build": "tsc -b",
+    "check": "tsc -b --pretty false",
+    "clean": "tsc -b --clean",
+    "test": "node --test dist/*.test.js"
+  }
+}

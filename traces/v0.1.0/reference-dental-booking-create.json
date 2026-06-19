@@ -1,0 +1,212 @@
+{
+  "osbp_trace_version": "0.1.0",
+  "name": "reference-dental-booking-create",
+  "source": "credential-free synthetic reference backend",
+  "clock": "2026-07-01T09:00:00.000Z",
+  "redaction": "No redaction required: all ids, names, domains, and contact values are synthetic.",
+  "scenario": {
+    "id": "reference.dental.create",
+    "title": "Dental cleaning booked inside a mandate",
+    "claim": "OSBP can book a normal in-person provider appointment only when the selected service, time, provider, location, and price fit inside a user-approved BookingMandate.",
+    "business_type": "dental_clinic",
+    "modality": "in_person",
+    "region": {
+      "country": "US",
+      "currency": "USD",
+      "timezone": "America/New_York"
+    },
+    "intent": "Book a regular cleaning at Carolyn's Dental, up to $150.00.",
+    "user_request": "Book a regular cleaning at Carolyn's Dental, up to $150.00. The agent selects Dr. Mina Lee at 09:00, and the BookingMandate records that exact service, provider, slot, and price cap.",
+    "organization_id": "org_01jz7ay6r8dd6yskkpt8rvhk8z",
+    "organization_name": "Carolyn's Dental",
+    "selection": {
+      "organization_id": "org_01jz7ay6r8dd6yskkpt8rvhk8z",
+      "organization_name": "Carolyn's Dental",
+      "service_id": "dental_cleaning",
+      "service_name": "Regular cleaning",
+      "schedule_id": "dental_midtown",
+      "schedule_name": "Midtown Dental Suite",
+      "provider_id": "dental_dr_lee",
+      "provider_name": "Dr. Mina Lee",
+      "date": "2026-07-07",
+      "time": "09:00"
+    },
+    "expected": {
+      "happy_path": "booking_created",
+      "guardrails": [
+        "price_exceeds_mandate"
+      ]
+    }
+  },
+  "steps": [
+    {
+      "step": 1,
+      "tool": "service.describe",
+      "input": {
+        "service_id": "dental_cleaning"
+      },
+      "result": {
+        "ok": true,
+        "value": {
+          "id": "dental_cleaning",
+          "name": "Regular cleaning",
+          "duration": "PT45M",
+          "price": {
+            "amount_minor": 12000,
+            "currency": "USD",
+            "type": "fixed",
+            "display": "$120.00"
+          }
+        }
+      }
+    },
+    {
+      "step": 2,
+      "tool": "availability.find",
+      "input": {
+        "service_id": "dental_cleaning",
+        "schedule_id": "dental_midtown",
+        "provider_id": "dental_dr_lee",
+        "date": "2026-07-07"
+      },
+      "result": {
+        "ok": true,
+        "value": [
+          {
+            "id": "dental_midtown:dental_dr_lee:dental_cleaning:2026-07-07T09:00:00",
+            "organization_id": "org_01jz7ay6r8dd6yskkpt8rvhk8z",
+            "organization_name": "Carolyn's Dental",
+            "service_id": "dental_cleaning",
+            "schedule_id": "dental_midtown",
+            "schedule_name": "Midtown Dental Suite",
+            "schedule_address": "245 E 40th St, New York, NY 10016",
+            "schedule_latitude": 40.7481,
+            "schedule_longitude": -73.9725,
+            "schedule_timezone": "America/New_York",
+            "provider_id": "dental_dr_lee",
+            "provider_name": "Dr. Mina Lee",
+            "provider_has_portfolio": true,
+            "starts_at": "2026-07-07T13:00:00.000Z",
+            "ends_at": "2026-07-07T13:45:00.000Z",
+            "starts_at_local": "2026-07-07T09:00:00",
+            "ends_at_local": "2026-07-07T09:45:00",
+            "price": {
+              "amount_minor": 12000,
+              "currency": "USD",
+              "type": "fixed",
+              "display": "$120.00"
+            }
+          }
+        ]
+      }
+    },
+    {
+      "step": 3,
+      "tool": "policy.explain",
+      "input": {
+        "service_id": "dental_cleaning"
+      },
+      "result": {
+        "ok": true,
+        "value": {
+          "service_id": "dental_cleaning",
+          "payment_requirement": "none",
+          "verification_method": "none",
+          "cancellation_enabled": true,
+          "cancellation_window": "PT24H",
+          "no_show_fee": {
+            "amount_minor": 5000,
+            "currency": "USD",
+            "type": "fixed",
+            "display": "$50.00"
+          }
+        }
+      }
+    },
+    {
+      "step": 4,
+      "tool": "booking.create",
+      "input": {
+        "mandate": {
+          "id": "mandate_8f44d4ab-8c56-4f6d-9e0f-d5d3e2d36f88",
+          "expires_at": "2026-07-02T09:00:00.000Z",
+          "allowed_actions": [
+            "booking.create"
+          ],
+          "organization_id": "org_01jz7ay6r8dd6yskkpt8rvhk8z",
+          "service_ids": [
+            "dental_cleaning"
+          ],
+          "provider_ids": [
+            "dental_dr_lee"
+          ],
+          "schedule_ids": [
+            "dental_midtown"
+          ],
+          "earliest_start": "2026-07-07T09:00:00",
+          "latest_end": "2026-07-07T09:45:00",
+          "max_price": {
+            "amount_minor": 15000,
+            "currency": "USD"
+          },
+          "allow_policy_fee": false,
+          "max_extra_fee": {
+            "amount_minor": 0,
+            "currency": "USD"
+          }
+        },
+        "idempotency_key": "idempotency-reference-dental-cleaning-create",
+        "service_id": "dental_cleaning",
+        "schedule_id": "dental_midtown",
+        "provider_id": "dental_dr_lee",
+        "date": "2026-07-07",
+        "time": "09:00",
+        "customer": {
+          "id": "cus_01jz7eg2v8y0fq3k9q9m7t8n2a",
+          "display_name": "Alex Smith"
+        }
+      },
+      "authorization_gate": {
+        "ok": true,
+        "checks": [
+          "action",
+          "organization",
+          "service",
+          "provider",
+          "schedule",
+          "time_window",
+          "price",
+          "policy"
+        ]
+      },
+      "result": {
+        "ok": true,
+        "value": {
+          "id": "rcpt_01jz7f2szt8h7q6m5n4p3r2v9k",
+          "booking_id": "bk_01jz7f2szt8h7q6m5n4p3r2v9k",
+          "text": "Booked Regular cleaning on 2026-07-07 at 09:00. Reference booking id: bk_01jz7f2szt8h7q6m5n4p3r2v9k."
+        }
+      }
+    },
+    {
+      "step": 5,
+      "tool": "booking.status",
+      "input": {
+        "booking_id": "bk_01jz7f2szt8h7q6m5n4p3r2v9k"
+      },
+      "result": {
+        "ok": true,
+        "value": {
+          "id": "bk_01jz7f2szt8h7q6m5n4p3r2v9k",
+          "service_id": "dental_cleaning",
+          "schedule_id": "dental_midtown",
+          "provider_id": "dental_dr_lee",
+          "status": "booked",
+          "starts_at": "2026-07-07T13:00:00.000Z",
+          "starts_at_local": "2026-07-07T09:00:00",
+          "schedule_timezone": "America/New_York"
+        }
+      }
+    }
+  ]
+}

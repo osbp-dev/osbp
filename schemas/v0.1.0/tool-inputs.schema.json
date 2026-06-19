@@ -1,0 +1,354 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://osbp.dev/schemas/v0.1.0/tool-inputs.schema.json",
+  "title": "OSBP v0.1.0 MCP Tool Inputs",
+  "$defs": {
+    "osbp_service_describe": {
+      "type": "object",
+      "properties": {
+        "service_id": {
+          "description": "Service to describe. Omit to use the first configured service.",
+          "type": "string"
+        }
+      },
+      "additionalProperties": false
+    },
+    "osbp_availability_find": {
+      "type": "object",
+      "properties": {
+        "service_id": {
+          "description": "Service to search. Omit to use the first configured service.",
+          "type": "string"
+        },
+        "schedule_id": {
+          "description": "Schedule (location) to search. Omit to use the first configured schedule.",
+          "type": "string"
+        },
+        "date": {
+          "description": "ISO 8601 date to search (YYYY-MM-DD).",
+          "type": "string"
+        },
+        "provider_id": {
+          "description": "Restrict results to this provider. Omit to return all available providers.",
+          "type": "string"
+        }
+      },
+      "required": [
+        "date"
+      ],
+      "additionalProperties": false
+    },
+    "osbp_policy_explain": {
+      "type": "object",
+      "properties": {
+        "service_id": {
+          "description": "Service to explain policy for. Omit to use the first configured service.",
+          "type": "string"
+        }
+      },
+      "additionalProperties": false
+    },
+    "osbp_verification_send": {
+      "type": "object",
+      "properties": {
+        "customer": {
+          "type": "object",
+          "properties": {
+            "id": {
+              "type": "string"
+            },
+            "phone": {
+              "type": "string"
+            },
+            "email": {
+              "type": "string"
+            },
+            "display_name": {
+              "type": "string"
+            }
+          },
+          "additionalProperties": false
+        },
+        "purpose": {
+          "type": "string"
+        }
+      },
+      "additionalProperties": false
+    },
+    "osbp_verification_verify": {
+      "type": "object",
+      "properties": {
+        "customer": {
+          "type": "object",
+          "properties": {
+            "id": {
+              "type": "string"
+            },
+            "phone": {
+              "type": "string"
+            },
+            "email": {
+              "type": "string"
+            },
+            "display_name": {
+              "type": "string"
+            }
+          },
+          "additionalProperties": false
+        },
+        "purpose": {
+          "type": "string"
+        },
+        "code": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "code"
+      ],
+      "additionalProperties": false
+    },
+    "osbp_booking_create": {
+      "type": "object",
+      "properties": {
+        "mandate": {
+          "type": "object",
+          "properties": {
+            "id": {
+              "type": "string"
+            },
+            "expires_at": {
+              "type": "string"
+            },
+            "allowed_actions": {
+              "type": "array",
+              "items": {
+                "type": "string",
+                "enum": [
+                  "service.describe",
+                  "availability.find",
+                  "policy.explain",
+                  "verification.send",
+                  "verification.verify",
+                  "booking.create",
+                  "booking.status",
+                  "handoff.request"
+                ]
+              }
+            },
+            "organization_id": {
+              "type": "string"
+            },
+            "service_ids": {
+              "type": "array",
+              "items": {
+                "type": "string"
+              }
+            },
+            "provider_ids": {
+              "type": "array",
+              "items": {
+                "type": "string"
+              }
+            },
+            "schedule_ids": {
+              "type": "array",
+              "items": {
+                "type": "string"
+              }
+            },
+            "earliest_start": {
+              "type": "string"
+            },
+            "latest_end": {
+              "type": "string"
+            },
+            "max_price": {
+              "type": "object",
+              "properties": {
+                "amount_minor": {
+                  "type": "integer",
+                  "minimum": 0,
+                  "maximum": 9007199254740991
+                },
+                "currency": {
+                  "type": "string"
+                },
+                "type": {
+                  "type": "string",
+                  "enum": [
+                    "fixed",
+                    "insurance_dependent",
+                    "quote_required",
+                    "unknown"
+                  ]
+                },
+                "display": {
+                  "type": "string"
+                }
+              },
+              "required": [
+                "currency"
+              ],
+              "additionalProperties": false
+            },
+            "allow_policy_fee": {
+              "type": "boolean"
+            },
+            "max_extra_fee": {
+              "type": "object",
+              "properties": {
+                "amount_minor": {
+                  "type": "integer",
+                  "minimum": 0,
+                  "maximum": 9007199254740991
+                },
+                "currency": {
+                  "type": "string"
+                },
+                "type": {
+                  "type": "string",
+                  "enum": [
+                    "fixed",
+                    "insurance_dependent",
+                    "quote_required",
+                    "unknown"
+                  ]
+                },
+                "display": {
+                  "type": "string"
+                }
+              },
+              "required": [
+                "currency"
+              ],
+              "additionalProperties": false
+            }
+          },
+          "required": [
+            "id",
+            "expires_at",
+            "allowed_actions",
+            "organization_id"
+          ],
+          "additionalProperties": false
+        },
+        "idempotency_key": {
+          "type": "string",
+          "minLength": 1
+        },
+        "service_id": {
+          "type": "string"
+        },
+        "schedule_id": {
+          "type": "string"
+        },
+        "provider_id": {
+          "type": "string"
+        },
+        "date": {
+          "type": "string"
+        },
+        "time": {
+          "description": "Merchant-local HH:MM from selected Slot.starts_at_local.slice(11,16).",
+          "type": "string"
+        },
+        "customer": {
+          "type": "object",
+          "properties": {
+            "id": {
+              "type": "string"
+            },
+            "phone": {
+              "type": "string"
+            },
+            "email": {
+              "type": "string"
+            },
+            "display_name": {
+              "type": "string"
+            }
+          },
+          "additionalProperties": false
+        },
+        "approval": {
+          "type": "object",
+          "properties": {
+            "confirmed": {
+              "type": "boolean",
+              "const": true
+            },
+            "token": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "confirmed",
+            "token"
+          ],
+          "additionalProperties": false
+        },
+        "verification_code": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "mandate",
+        "idempotency_key",
+        "service_id",
+        "schedule_id",
+        "provider_id",
+        "date",
+        "time"
+      ],
+      "additionalProperties": false
+    },
+    "osbp_booking_status": {
+      "type": "object",
+      "properties": {
+        "booking_id": {
+          "description": "Booking id from the booking.create receipt. Omit to probe by customer contact.",
+          "type": "string"
+        },
+        "customer": {
+          "type": "object",
+          "properties": {
+            "id": {
+              "type": "string"
+            },
+            "phone": {
+              "type": "string"
+            },
+            "email": {
+              "type": "string"
+            },
+            "display_name": {
+              "type": "string"
+            }
+          },
+          "additionalProperties": false
+        }
+      },
+      "additionalProperties": false
+    },
+    "osbp_handoff_request": {
+      "type": "object",
+      "properties": {
+        "reason": {
+          "type": "string"
+        },
+        "message": {
+          "type": "string"
+        },
+        "mandate_id": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "reason",
+        "message"
+      ],
+      "additionalProperties": false
+    }
+  }
+}
