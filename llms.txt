@@ -1,0 +1,22 @@
+# OSBP (Open Service Booking Protocol)
+
+> A small protocol layer that lets an AI agent book a service appointment under a user-approved, scoped authorization (`BookingMandate`), riding on the Model Context Protocol (MCP). The booking platform stays the system of record; OSBP validates authority, fails closed on anything unknown or unauthorized, and records an audit trail. It does not move money.
+
+## Spec
+
+- [Protocol spec](docs/spec/v0.1.0/README.md): tool semantics, mandate enforcement, audit, security, and the adapter contract.
+- [Schema](docs/spec/v0.1.0/schema.md): field definitions, tool inputs, the result envelope, the `Problem` code table, and time formats.
+- [Implementing an adapter](docs/spec/v0.1.0/implementing-an-adapter.md): the seven `BookingAdapter` methods mapped to conformance requirement ids.
+
+## Guides
+
+- [AGENTS.md](AGENTS.md): the adapter-implementation guide for developers and for AI agents generating adapters.
+- [CONTRIBUTING.md](CONTRIBUTING.md): contribution workflow and AI-disclosure conventions.
+
+## AI context bundle
+
+- [dist/osbp-adapter-context.md](dist/osbp-adapter-context.md): the spec, JSON Schemas, adapter interface, conformance list, and starter skeleton packaged as a single context file for AI-assisted adapter generation.
+
+## Traces
+
+- [Trace gallery](traces/v0.1.0/): credential-free reference traces. `npm run trace` replays the reference traces locally with no secrets.

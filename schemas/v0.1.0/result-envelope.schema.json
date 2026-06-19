@@ -1,0 +1,43 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://osbp.dev/schemas/v0.1.0/result-envelope.schema.json",
+  "title": "OSBP v0.1.0 Result Envelope",
+  "oneOf": [
+    {
+      "type": "object",
+      "properties": {
+        "ok": {
+          "const": true
+        },
+        "value": true,
+        "audit_event_id": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "ok",
+        "value"
+      ],
+      "additionalProperties": false
+    },
+    {
+      "type": "object",
+      "properties": {
+        "ok": {
+          "const": false
+        },
+        "problem": {
+          "$ref": "problem.schema.json"
+        },
+        "audit_event_id": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "ok",
+        "problem"
+      ],
+      "additionalProperties": false
+    }
+  ]
+}

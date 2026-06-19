@@ -1,0 +1,138 @@
+{
+  "osbp_trace_version": "0.1.0",
+  "name": "reference-dental-fail-closed-guardrails",
+  "source": "credential-free synthetic reference backend",
+  "clock": "2026-07-01T09:00:00.000Z",
+  "redaction": "No redaction required: all ids, names, domains, and contact values are synthetic.",
+  "scenario": {
+    "id": "reference.dental.fail_closed_guardrails",
+    "title": "Dental booking guardrails fail closed",
+    "claim": "OSBP refuses booking.create when the requested service exceeds the mandate price cap or requires unsupported consultation handoff.",
+    "business_type": "dental_clinic",
+    "modality": "in_person",
+    "region": {
+      "country": "US",
+      "currency": "USD",
+      "timezone": "America/New_York"
+    },
+    "intent": "Book dental treatment only if it stays inside the approved cap and can be booked directly.",
+    "user_request": "Book a crown if it is under $150, and book a new-patient exam only if it can be booked directly. The agent selects concrete dental options, and OSBP checks them against the user's caps and direct-booking boundary.",
+    "organization_id": "org_01jz7ay6r8dd6yskkpt8rvhk8z",
+    "organization_name": "Carolyn's Dental",
+    "expected": {
+      "happy_path": "no_booking_created",
+      "guardrails": [
+        "price_exceeds_mandate",
+        "requires_consultation_handoff"
+      ]
+    }
+  },
+  "steps": [
+    {
+      "step": 1,
+      "tool": "booking.create",
+      "input": {
+        "mandate": {
+          "id": "mandate_f89d3251-4b73-4d40-8b28-6f7a2e8d00f6",
+          "expires_at": "2026-07-02T09:00:00.000Z",
+          "allowed_actions": [
+            "booking.create"
+          ],
+          "organization_id": "org_01jz7ay6r8dd6yskkpt8rvhk8z",
+          "service_ids": [
+            "dental_crown"
+          ],
+          "provider_ids": [
+            "dental_dr_lee"
+          ],
+          "schedule_ids": [
+            "dental_midtown"
+          ],
+          "earliest_start": "2026-07-07T09:00:00",
+          "latest_end": "2026-07-07T10:30:00",
+          "max_price": {
+            "amount_minor": 15000,
+            "currency": "USD"
+          },
+          "allow_policy_fee": false,
+          "max_extra_fee": {
+            "amount_minor": 0,
+            "currency": "USD"
+          }
+        },
+        "idempotency_key": "idempotency-reference-dental-crown-guardrail",
+        "service_id": "dental_crown",
+        "schedule_id": "dental_midtown",
+        "provider_id": "dental_dr_lee",
+        "date": "2026-07-07",
+        "time": "09:00",
+        "customer": {
+          "id": "cus_01jz7eqc0zb8zk5pn0ckqkve4p",
+          "display_name": "Alex Smith"
+        }
+      },
+      "result": {
+        "ok": false,
+        "problem": {
+          "code": "price_exceeds_mandate",
+          "message": "Selected service or slot price exceeds BookingMandate.max_price",
+          "retryable": false
+        }
+      },
+      "platform_write": false
+    },
+    {
+      "step": 2,
+      "tool": "booking.create",
+      "input": {
+        "mandate": {
+          "id": "mandate_9d78d205-32f8-490d-b1f5-2277abf85122",
+          "expires_at": "2026-07-02T09:00:00.000Z",
+          "allowed_actions": [
+            "booking.create"
+          ],
+          "organization_id": "org_01jz7ay6r8dd6yskkpt8rvhk8z",
+          "service_ids": [
+            "dental_new_patient_exam"
+          ],
+          "provider_ids": [
+            "dental_dr_lee"
+          ],
+          "schedule_ids": [
+            "dental_midtown"
+          ],
+          "earliest_start": "2026-07-07T09:00:00",
+          "latest_end": "2026-07-07T10:00:00",
+          "max_price": {
+            "amount_minor": 25000,
+            "currency": "USD"
+          },
+          "allow_policy_fee": false,
+          "max_extra_fee": {
+            "amount_minor": 0,
+            "currency": "USD"
+          }
+        },
+        "idempotency_key": "idempotency-reference-dental-exam-handoff",
+        "service_id": "dental_new_patient_exam",
+        "schedule_id": "dental_midtown",
+        "provider_id": "dental_dr_lee",
+        "date": "2026-07-07",
+        "time": "09:00",
+        "customer": {
+          "id": "cus_01jz7er9ps7xjea03s8s8g59m7",
+          "display_name": "Alex Smith"
+        }
+      },
+      "result": {
+        "ok": false,
+        "problem": {
+          "code": "requires_consultation_handoff",
+          "message": "Selected service requires a consultation/quote workflow that OSBP v0.1.0 cannot drive; route to handoff.request",
+          "retryable": false
+        }
+      },
+      "platform_write": false
+    }
+  ]
+}

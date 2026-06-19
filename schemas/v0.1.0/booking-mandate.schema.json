@@ -1,0 +1,125 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://osbp.dev/schemas/v0.1.0/booking-mandate.schema.json",
+  "title": "OSBP v0.1.0 BookingMandate",
+  "type": "object",
+  "properties": {
+    "id": {
+      "type": "string"
+    },
+    "expires_at": {
+      "type": "string"
+    },
+    "allowed_actions": {
+      "type": "array",
+      "items": {
+        "type": "string",
+        "enum": [
+          "service.describe",
+          "availability.find",
+          "policy.explain",
+          "verification.send",
+          "verification.verify",
+          "booking.create",
+          "booking.status",
+          "handoff.request"
+        ]
+      }
+    },
+    "organization_id": {
+      "type": "string"
+    },
+    "service_ids": {
+      "type": "array",
+      "items": {
+        "type": "string"
+      }
+    },
+    "provider_ids": {
+      "type": "array",
+      "items": {
+        "type": "string"
+      }
+    },
+    "schedule_ids": {
+      "type": "array",
+      "items": {
+        "type": "string"
+      }
+    },
+    "earliest_start": {
+      "type": "string"
+    },
+    "latest_end": {
+      "type": "string"
+    },
+    "max_price": {
+      "type": "object",
+      "properties": {
+        "amount_minor": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 9007199254740991
+        },
+        "currency": {
+          "type": "string"
+        },
+        "type": {
+          "type": "string",
+          "enum": [
+            "fixed",
+            "insurance_dependent",
+            "quote_required",
+            "unknown"
+          ]
+        },
+        "display": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "currency"
+      ],
+      "additionalProperties": false
+    },
+    "allow_policy_fee": {
+      "type": "boolean"
+    },
+    "max_extra_fee": {
+      "type": "object",
+      "properties": {
+        "amount_minor": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 9007199254740991
+        },
+        "currency": {
+          "type": "string"
+        },
+        "type": {
+          "type": "string",
+          "enum": [
+            "fixed",
+            "insurance_dependent",
+            "quote_required",
+            "unknown"
+          ]
+        },
+        "display": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "currency"
+      ],
+      "additionalProperties": false
+    }
+  },
+  "required": [
+    "id",
+    "expires_at",
+    "allowed_actions",
+    "organization_id"
+  ],
+  "additionalProperties": false
+}

@@ -1,0 +1,190 @@
+{
+  "osbp_trace_version": "0.1.0",
+  "name": "reference-auto-timezone-currency",
+  "source": "credential-free synthetic reference backend",
+  "clock": "2026-07-01T09:00:00.000Z",
+  "redaction": "No redaction required: all ids, names, domains, and contact values are synthetic.",
+  "scenario": {
+    "id": "reference.auto.timezone_currency",
+    "title": "Berlin auto service uses EUR and merchant-local time",
+    "claim": "OSBP can book outside the US while preserving ISO 4217 currency and IANA timezone semantics.",
+    "business_type": "auto_service",
+    "modality": "in_person",
+    "region": {
+      "country": "DE",
+      "currency": "EUR",
+      "timezone": "Europe/Berlin"
+    },
+    "intent": "Book an oil change in Berlin, up to EUR 100.00.",
+    "user_request": "Book an oil change in Berlin, up to EUR 100.00. The agent selects Anna Fischer at 09:00 local time, and the BookingMandate records the Berlin slot and EUR cap.",
+    "organization_id": "org_01jz7jevggr5st9acrxfbexvzz",
+    "organization_name": "Andy's Auto",
+    "selection": {
+      "organization_id": "org_01jz7jevggr5st9acrxfbexvzz",
+      "organization_name": "Andy's Auto",
+      "service_id": "auto_oil_change",
+      "service_name": "Oil change (Ölwechsel)",
+      "schedule_id": "auto_berlin_shop",
+      "schedule_name": "Kreuzberg Service Bay",
+      "provider_id": "auto_tech_anna",
+      "provider_name": "Anna Fischer",
+      "date": "2026-07-07",
+      "time": "09:00"
+    },
+    "expected": {
+      "happy_path": "booking_created",
+      "guardrails": []
+    }
+  },
+  "steps": [
+    {
+      "step": 1,
+      "tool": "service.describe",
+      "input": {
+        "service_id": "auto_oil_change"
+      },
+      "result": {
+        "ok": true,
+        "value": {
+          "id": "auto_oil_change",
+          "name": "Oil change (Ölwechsel)",
+          "duration": "PT45M",
+          "price": {
+            "amount_minor": 8900,
+            "currency": "EUR",
+            "type": "fixed",
+            "display": "€89.00"
+          }
+        }
+      }
+    },
+    {
+      "step": 2,
+      "tool": "availability.find",
+      "input": {
+        "service_id": "auto_oil_change",
+        "schedule_id": "auto_berlin_shop",
+        "provider_id": "auto_tech_anna",
+        "date": "2026-07-07"
+      },
+      "result": {
+        "ok": true,
+        "value": [
+          {
+            "id": "auto_berlin_shop:auto_tech_anna:auto_oil_change:2026-07-07T09:00:00",
+            "organization_id": "org_01jz7jevggr5st9acrxfbexvzz",
+            "organization_name": "Andy's Auto",
+            "service_id": "auto_oil_change",
+            "schedule_id": "auto_berlin_shop",
+            "schedule_name": "Kreuzberg Service Bay",
+            "schedule_address": "Prinzenstrasse 85, 10969 Berlin",
+            "schedule_timezone": "Europe/Berlin",
+            "provider_id": "auto_tech_anna",
+            "provider_name": "Anna Fischer",
+            "starts_at": "2026-07-07T07:00:00.000Z",
+            "ends_at": "2026-07-07T07:45:00.000Z",
+            "starts_at_local": "2026-07-07T09:00:00",
+            "ends_at_local": "2026-07-07T09:45:00",
+            "price": {
+              "amount_minor": 8900,
+              "currency": "EUR",
+              "type": "fixed",
+              "display": "€89.00"
+            }
+          }
+        ]
+      }
+    },
+    {
+      "step": 3,
+      "tool": "policy.explain",
+      "input": {
+        "service_id": "auto_oil_change"
+      },
+      "result": {
+        "ok": true,
+        "value": {
+          "service_id": "auto_oil_change",
+          "payment_requirement": "none",
+          "cancellation_fee": {
+            "amount_minor": 3000,
+            "currency": "EUR",
+            "type": "fixed",
+            "display": "€30.00"
+          }
+        }
+      }
+    },
+    {
+      "step": 4,
+      "tool": "booking.create",
+      "input": {
+        "mandate": {
+          "id": "mandate_4cf5a8f0-7be1-4b30-8f48-2899f57d7dd2",
+          "expires_at": "2026-07-02T09:00:00.000Z",
+          "allowed_actions": [
+            "booking.create"
+          ],
+          "organization_id": "org_01jz7jevggr5st9acrxfbexvzz",
+          "service_ids": [
+            "auto_oil_change"
+          ],
+          "provider_ids": [
+            "auto_tech_anna"
+          ],
+          "schedule_ids": [
+            "auto_berlin_shop"
+          ],
+          "earliest_start": "2026-07-07T09:00:00",
+          "latest_end": "2026-07-07T09:45:00",
+          "max_price": {
+            "amount_minor": 10000,
+            "currency": "EUR"
+          },
+          "allow_policy_fee": true,
+          "max_extra_fee": {
+            "amount_minor": 3000,
+            "currency": "EUR"
+          }
+        },
+        "idempotency_key": "idempotency-reference-auto-berlin",
+        "service_id": "auto_oil_change",
+        "schedule_id": "auto_berlin_shop",
+        "provider_id": "auto_tech_anna",
+        "date": "2026-07-07",
+        "time": "09:00",
+        "customer": {
+          "id": "cus_01jz7ej5s3dt4j7x4gmx4z6t5v",
+          "display_name": "Alex Smith"
+        }
+      },
+      "result": {
+        "ok": true,
+        "value": {
+          "id": "rcpt_01jz7f4vc6g9te2hd8bn1q5x3m",
+          "booking_id": "bk_01jz7f4vc6g9te2hd8bn1q5x3m"
+        }
+      }
+    },
+    {
+      "step": 5,
+      "tool": "booking.status",
+      "input": {
+        "booking_id": "bk_01jz7f4vc6g9te2hd8bn1q5x3m"
+      },
+      "result": {
+        "ok": true,
+        "value": {
+          "id": "bk_01jz7f4vc6g9te2hd8bn1q5x3m",
+          "service_id": "auto_oil_change",
+          "schedule_id": "auto_berlin_shop",
+          "provider_id": "auto_tech_anna",
+          "status": "booked",
+          "starts_at": "2026-07-07T07:00:00.000Z",
+          "starts_at_local": "2026-07-07T09:00:00",
+          "schedule_timezone": "Europe/Berlin"
+        }
+      }
+    }
+  ]
+}

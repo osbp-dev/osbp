@@ -1,0 +1,17 @@
+{
+  "files": [],
+  "references": [
+    {
+      "path": "packages/osbp-core"
+    },
+    {
+      "path": "packages/reference-backend"
+    },
+    {
+      "path": "packages/osbp-conformance"
+    },
+    {
+      "path": "packages/adapter-starter"
+    }
+  ]
+}

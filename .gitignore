@@ -1,0 +1,15 @@
+# Dependencies
+node_modules/
+
+# TypeScript build output
+packages/*/dist/
+*.tsbuildinfo
+
+# Local machine files
+.DS_Store
+.env
+.env.*
+
+# Runtime state and coverage
+.osbp/
+coverage/

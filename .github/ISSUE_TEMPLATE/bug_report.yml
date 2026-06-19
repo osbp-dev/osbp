@@ -1,0 +1,40 @@
+name: Bug report
+description: Something in OSBP is not working as the spec says it should.
+labels: [bug]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        For security vulnerabilities, use the [private vulnerability reporting](../security/advisories/new) channel instead of opening an issue here.
+
+  - type: textarea
+    id: description
+    attributes:
+      label: What happened?
+      description: What did you observe, and what did you expect?
+    validations:
+      required: true
+
+  - type: textarea
+    id: reproduce
+    attributes:
+      label: Steps to reproduce
+      description: A minimal reproduction -- ideally a failing `npm test` case or a short script.
+    validations:
+      required: true
+
+  - type: input
+    id: version
+    attributes:
+      label: OSBP version
+      placeholder: "0.1.0"
+    validations:
+      required: true
+
+  - type: input
+    id: node
+    attributes:
+      label: Node.js version
+      placeholder: "22.x"
+    validations:
+      required: true
