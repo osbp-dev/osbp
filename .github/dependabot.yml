@@ -5,6 +5,12 @@ updates:
     schedule:
       interval: weekly
     open-pull-requests-limit: 5
+    ignore:
+      # @types/node tracks our supported Node floor (engines: >=22), not the
+      # newest release. Take major bumps deliberately when we raise the floor.
+      # 24.x minor and patch type fixes still come through.
+      - dependency-name: "@types/node"
+        update-types: ["version-update:semver-major"]
 
   - package-ecosystem: github-actions
     directory: "/"
