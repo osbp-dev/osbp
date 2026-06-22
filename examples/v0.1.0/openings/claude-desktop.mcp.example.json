@@ -1,0 +1,11 @@
+{
+  "mcpServers": {
+    "osbp-openings-v0.1.0": {
+      "command": "<ABSOLUTE_PATH_TO_NODE>",
+      "args": [
+        "<ABSOLUTE_PATH_TO_REPO>/packages/osbp-mcp-server/dist/server.js"
+      ],
+      "cwd": "<ABSOLUTE_PATH_TO_REPO>"
+    }
+  }
+}

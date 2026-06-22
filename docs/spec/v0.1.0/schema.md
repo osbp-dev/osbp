@@ -5,7 +5,7 @@ Audience: implementers and reviewers of the v0.1.0 MCP/tool schemas.
 - **Status:** implementation-bound proof-of-concept schema
 - **Compatibility:** not stable; no public compatibility promise
 
-This document describes the schema currently used by the v0.1.0 proof-of-concept implementation. It is intentionally narrow: one agent host, one synthetic reference backend, one create-booking flow, local stdio MCP, and redacted local audit events.
+This document describes the schema currently used by the v0.1.0 proof-of-concept implementation. It is intentionally narrow: one local agent-host path, one synthetic reference backend, one worked Openings adapter, one create-booking flow, local stdio MCP, and redacted local audit events.
 
 Do not treat this as the long-term OSBP protocol schema. v0.2.0 may revise these shapes for remote MCP hosting, OpenAI/ChatGPT metadata, provider/location resolution, auth context, and multi-currency money objects.
 

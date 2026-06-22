@@ -11,13 +11,16 @@
     "packages/*"
   ],
   "scripts": {
-    "build": "tsc -b packages/osbp-core packages/reference-backend packages/osbp-conformance packages/adapter-starter",
+    "build": "tsc -b packages/osbp-core packages/openings-adapter packages/osbp-mcp-server packages/reference-backend packages/osbp-conformance packages/adapter-starter",
     "build:spec": "node scripts/build-spec.mjs",
     "check": "npm run build && npm run check:spec && npm run check:adapter-context",
     "check:spec": "node scripts/build-spec.mjs --check",
     "check:adapter-context": "node scripts/build-adapter-context.mjs --check",
     "spell": "cspell \"**/*.{md,ts,mts,mjs,json,txt,yml,yaml}\" --no-progress",
-    "clean": "tsc -b packages/osbp-core packages/reference-backend packages/osbp-conformance packages/adapter-starter --clean",
+    "security": "sh tools/security-scan.sh",
+    "security:code": "sh tools/semgrep-scan.sh",
+    "security:deps": "sh tools/osv-scan.sh",
+    "clean": "tsc -b packages/osbp-core packages/openings-adapter packages/osbp-mcp-server packages/reference-backend packages/osbp-conformance packages/adapter-starter --clean",
     "test": "node --test scripts/*.test.mjs packages/*/dist/*.test.js",
     "trace": "npm run build --silent && node scripts/run-reference-trace.mjs",
     "conformance": "npm run build --silent && node packages/osbp-conformance/dist/cli.js",

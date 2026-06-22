@@ -16,7 +16,7 @@ Audience: contributors and reviewers implementing or validating the v0.1.0 proof
 - **Scope:** any MCP-compatible agent host (for example Claude or ChatGPT), one synthetic reference backend, one create-booking flow
 - **Compatibility:** no stability promise
 
-The implementation-bound v0.1.0 schema is captured in [schema.md](schema.md), and platform implementers should start with [implementing-an-adapter.md](implementing-an-adapter.md). The credential-free reference backend in this repository is the worked, conformance-checked adapter that every integrator can follow.
+The implementation-bound v0.1.0 schema is captured in [schema.md](schema.md), and platform implementers should start with [implementing-an-adapter.md](implementing-an-adapter.md). The credential-free reference backend in this repository is the conformance-checked adapter that every integrator can run without secrets; the Openings adapter is the worked real-platform example.
 
 The Open Service Booking Protocol (OSBP) is a small, open protocol that lets an AI agent book a service appointment only inside a user-approved authorization called a `BookingMandate`. The agent can search, compare, and prepare freely; it can mutate only inside the mandate. OSBP authorizes the booking, not the payment.
 
@@ -757,7 +757,7 @@ The reference adapter in the repository implements this pattern; its internal `c
 
 ### Getting Started
 
-- [Reference implementation](https://github.com/osbp-dev/osbp): TypeScript monorepo with the protocol core, the credential-free synthetic reference backend, the conformance kit, and an adapter starter.
+- [Reference implementation](https://github.com/osbp-dev/osbp): TypeScript monorepo with the protocol core, the credential-free synthetic reference backend, the conformance kit, an adapter starter, the local stdio MCP server, and the worked Openings adapter.
 - [Run the demo](https://github.com/osbp-dev/osbp/tree/main/packages/reference-backend): `npm run demo` books a synthetic appointment inside a `BookingMandate`, then shows the guardrail rejecting an over-cap booking, with no account or secrets.
 - [Trace gallery](https://github.com/osbp-dev/osbp/tree/main/traces): replayable credential-free reference traces, from user request through mandate, tool calls, guardrails, and receipt.
 
@@ -787,7 +787,7 @@ Audience: implementers and reviewers of the v0.1.0 MCP/tool schemas.
 - **Status:** implementation-bound proof-of-concept schema
 - **Compatibility:** not stable; no public compatibility promise
 
-This document describes the schema currently used by the v0.1.0 proof-of-concept implementation. It is intentionally narrow: one agent host, one synthetic reference backend, one create-booking flow, local stdio MCP, and redacted local audit events.
+This document describes the schema currently used by the v0.1.0 proof-of-concept implementation. It is intentionally narrow: one local agent-host path, one synthetic reference backend, one worked Openings adapter, one create-booking flow, local stdio MCP, and redacted local audit events.
 
 Do not treat this as the long-term OSBP protocol schema. v0.2.0 may revise these shapes for remote MCP hosting, OpenAI/ChatGPT metadata, provider/location resolution, auth context, and multi-currency money objects.
 

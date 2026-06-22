@@ -1,0 +1,14 @@
+# Semgrep scan scope for OSBP.
+# Semgrep already skips git-ignored paths. These entries cover tracked generated
+# artifacts and data snapshots that are not first-party source.
+
+node_modules/
+packages/*/dist/
+dist/
+coverage/
+.security/
+
+# Generated artifacts and trace galleries.
+package-lock.json
+schemas/
+traces/

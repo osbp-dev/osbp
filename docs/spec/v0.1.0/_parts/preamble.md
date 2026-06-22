@@ -8,4 +8,4 @@ Audience: contributors and reviewers implementing or validating the v0.1.0 proof
 - **Scope:** any MCP-compatible agent host (for example Claude or ChatGPT), one synthetic reference backend, one create-booking flow
 - **Compatibility:** no stability promise
 
-The implementation-bound v0.1.0 schema is captured in [schema.md](schema.md), and platform implementers should start with [implementing-an-adapter.md](implementing-an-adapter.md). The credential-free reference backend in this repository is the worked, conformance-checked adapter that every integrator can follow.
+The implementation-bound v0.1.0 schema is captured in [schema.md](schema.md), and platform implementers should start with [implementing-an-adapter.md](implementing-an-adapter.md). The credential-free reference backend in this repository is the conformance-checked adapter that every integrator can run without secrets; the Openings adapter is the worked real-platform example.

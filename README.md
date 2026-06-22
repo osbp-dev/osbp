@@ -13,7 +13,7 @@ The challenge is broad: dentists, notaries, auto shops, spas, clinics, classes, 
 
 OSBP's bet is that agents do not need unchecked write access to all of them. They need a common, inspectable way to look up services, explain policies, ask for bounded permission, book only inside that permission, and fail closed when the selected appointment no longer fits. OSBP v0.1.0 proves the smallest useful version of that method.
 
-The v0.1.0 release demonstrates the core claim: an agent-shaped flow books a synthetic appointment through OSBP, bounded by a mandate the user approved first. The agent can search, compare, and prepare freely. It can mutate only inside the mandate.
+The v0.1.0 release demonstrates the core claim: an agent-shaped flow books through OSBP, bounded by a mandate the user approved first. The credential-free demo books synthetic appointments; the worked Openings example drives the same contract against a real booking platform fixture. The agent can search, compare, and prepare freely. It can mutate only inside the mandate.
 
 ## Where OSBP Fits
 
@@ -58,19 +58,23 @@ The reference implementation includes:
 - a credential-free synthetic reference backend with four unrelated verticals
 - a reusable conformance kit that cross-checks the reference backend 44/44
 - an adapter starter kit that compiles and fails closed until implemented
-- redacted audit events and a credential-free reference trace gallery
+- a local stdio MCP server that exposes the eight OSBP tools
+- a worked Openings adapter and sample-salon example
+- redacted audit events, credential-free reference traces, and a redacted Openings trace
 
-This is the **minimal public cut**: the platform-neutral spec, the protocol core, the credential-free reference backend, the conformance kit, and an adapter starter. It demonstrates protocol behavior through the reference backend and `npm run demo` (a CLI), not through a hosted MCP server. OSBP defines its tools as MCP tools (see the [spec](docs/spec/v0.1.0/README.md)), but the stdio MCP server package and a worked real-platform adapter are deferred to a later cut; what this cut proves is the authorization model, the fail-closed guardrails, and the adapter contract.
+This is the **v0.1.0 public cut**: the platform-neutral spec, the protocol core, the credential-free reference backend, the conformance kit, an adapter starter, a local stdio MCP server, and a worked Openings adapter. The hosted remote MCP path is still deferred; what this cut proves is the authorization model, the fail-closed guardrails, the adapter contract, and the local MCP/Openings proof path.
 
 ## Run the Demo
 
-Run the credential-free demo. It needs no platform account and no secrets:
+Run the credential-free demo first. It needs no platform account and no secrets:
 
 ```sh
 npm run demo
 ```
 
 It books a synthetic appointment inside a `BookingMandate`, then attempts an over-cap booking under the same mandate and shows the gate rejecting it with `price_exceeds_mandate`.
+
+To run the live-platform fixture, start with [examples/v0.1.0/openings](examples/v0.1.0/openings). The safe read-only smoke exercises Openings service, policy, and availability reads without creating a booking. Live booking commands create real test appointments in the configured Openings demo salon.
 
 <!-- LAUNCH_GIF: embed the recorded demo GIF here before publishing (it ends on the over-cap rejection); see the demo runbook. -->
 
@@ -96,6 +100,9 @@ Every mutation requires a `BookingMandate` and an `idempotency_key`. If payment,
 - [Spec](docs/spec/v0.1.0/README.md): the protocol model, tools, mandate rules, and audit requirements.
 - [Schema](docs/spec/v0.1.0/schema.md): implementation-bound field definitions for the proof of concept.
 - [Reference backend](packages/reference-backend): the credential-free synthetic platform behind `npm run demo`; the recommended first run.
+- [Openings example](examples/v0.1.0/openings): local MCP server plus the worked Openings adapter against a configured sample salon.
+- [MCP server](packages/osbp-mcp-server): local stdio host exposing the eight OSBP tools.
+- [Openings adapter](packages/openings-adapter): worked real-platform adapter for Openings' public REST API.
 - [Trace gallery](traces/v0.1.0/): `npm run trace` replays the credential-free reference traces locally with no secrets.
 - [Roadmap](ROADMAP.md): near-term direction while the protocol is pre-1.0.
 
