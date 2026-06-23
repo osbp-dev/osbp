@@ -38,6 +38,34 @@ node packages/<your-adapter>/dist/cli.js --conformance
 
 The unimplemented starter should fail. That is the point: it returns typed `AdapterResult` Problems with code `adapter_not_implemented` rather than throwing or fabricating data. Progress is visible as failing requirement ids move to pass.
 
+## Platform Versions and Drift
+
+Treat platform contract evidence as adapter-owned and platform-native. Every
+adapter should declare the native platform version it targets and capture
+response metadata, but OSBP does not require every adapter to implement the same
+drift watcher shape.
+
+Use the strongest official evidence the platform actually provides:
+
+- a dated request/version-echo model, such as Square, should be pinned and checked
+  through that native header model;
+- a per-endpoint version model, such as Cal.com, needs endpoint-specific pins and
+  smoke coverage for the endpoints the adapter uses;
+- a path-versioned API, such as Microsoft Graph, should record the path version
+  and monitor the platform's own release/deprecation signals;
+- a generated-client or closed-SDK platform should be treated as doc- or
+  SDK-derived until a sandbox run verifies the wire behavior;
+- a platform with no supportable public booking API should not get a scraping,
+  dashboard-automation, or private-endpoint adapter just to satisfy a checklist.
+
+Add a scheduled drift monitor only when there is a stable, official,
+non-PII-bearing contract source to diff and a clear operator action when it
+changes. A drift watcher is a worked guardrail when a platform publishes an
+OpenAPI document and echoes a version header. It is not a protocol requirement
+and should not be copied blindly into future adapters. If a platform lacks a
+comparable source, rely on static `platform.api_version`, upstream metadata
+capture, read-only smoke checks, and live verification notes instead.
+
 ## Method Map
 
 ### `describeService`

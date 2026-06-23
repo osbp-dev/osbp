@@ -6,9 +6,8 @@ updates:
       interval: weekly
     open-pull-requests-limit: 5
     ignore:
-      # @types/node tracks our supported Node floor (engines: >=22), not the
-      # newest release. Take major bumps deliberately when we raise the floor.
-      # 24.x minor and patch type fixes still come through.
+      # Stay on the Node 24 line: keep @types/node 24.x minor/patch updates,
+      # but skip the next major (24 -> 26). Drop this to move majors.
       - dependency-name: "@types/node"
         update-types: ["version-update:semver-major"]
 
