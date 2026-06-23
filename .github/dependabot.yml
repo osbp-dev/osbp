@@ -5,6 +5,11 @@ updates:
     schedule:
       interval: weekly
     open-pull-requests-limit: 5
+    ignore:
+      # Stay on the Node 24 line: keep @types/node 24.x minor/patch updates,
+      # but skip the next major (24 -> 26). Drop this to move majors.
+      - dependency-name: "@types/node"
+        update-types: ["version-update:semver-major"]
 
   - package-ecosystem: github-actions
     directory: "/"

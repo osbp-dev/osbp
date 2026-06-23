@@ -5,7 +5,7 @@
   "type": "module",
   "packageManager": "npm@11.16.0",
   "engines": {
-    "node": ">=22"
+    "node": ">=24"
   },
   "workspaces": [
     "packages/*"
@@ -13,7 +13,7 @@
   "scripts": {
     "build": "tsc -b packages/osbp-core packages/reference-backend packages/osbp-conformance packages/adapter-starter",
     "build:spec": "node scripts/build-spec.mjs",
-    "check": "npm run build && npm run check:spec && npm run check:adapter-context",
+    "check": "npm run build && npm run check:spec && npm run check:adapter-context && npm run check:cspell-coverage",
     "check:spec": "node scripts/build-spec.mjs --check",
     "check:adapter-context": "node scripts/build-adapter-context.mjs --check",
     "spell": "cspell \"**/*.{md,ts,mts,mjs,json,txt,yml,yaml}\" --no-progress",
@@ -22,7 +22,8 @@
     "trace": "npm run build --silent && node scripts/run-reference-trace.mjs",
     "conformance": "npm run build --silent && node packages/osbp-conformance/dist/cli.js",
     "coverage": "npm run build && node --test --experimental-test-coverage --test-coverage-include='packages/*/dist/*.js' --test-coverage-exclude='packages/*/dist/*.test.js' packages/*/dist/*.test.js",
-    "demo": "npm run demo --workspace @osbp/reference-backend"
+    "demo": "npm run demo --workspace @osbp/reference-backend",
+    "check:cspell-coverage": "node scripts/check-cspell-coverage.mjs"
   },
   "devDependencies": {
     "@types/node": "^24.13.0",

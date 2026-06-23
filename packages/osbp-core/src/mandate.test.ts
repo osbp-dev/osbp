@@ -414,9 +414,9 @@ describe("validateMandate", () => {
 
       assert.equal(result.ok, false);
       assert.equal(result.ok ? undefined : result.problem.code, "invalid_mandate");
-      assert.match(
-        result.ok ? "" : result.problem.message,
-        new RegExp(field.replace(/\./g, "\\."))
+      assert.ok(
+        (result.ok ? "" : result.problem.message).includes(field),
+        `expected problem message to mention ${field}`
       );
     });
   }

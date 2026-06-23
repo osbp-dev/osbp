@@ -404,8 +404,8 @@ export interface UpstreamMeta {
   // First response header whose name contains "request-id". The per-call
   // correlation handle for support escalation with the platform.
   request_id?: string;
-  // Response-side API version echo (api-version / x-api-version) when the
-  // platform sends one.
+  // Response-side API version echo when the platform sends one. The adapter
+  // selects which response header carries it.
   api_version?: string;
   // Deprecation header (RFC 9745), verbatim.
   deprecation?: string;
