@@ -1,10 +1,12 @@
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
+import { readFileSync } from "node:fs";
 import test from "node:test";
 import { fileURLToPath } from "node:url";
 import { dirname, resolve } from "node:path";
 
 const root = resolve(dirname(fileURLToPath(import.meta.url)), "..");
+const openingsTraceFile = "traces/v0.1.0/openings-create.json";
 
 test("run-reference-trace replays one checked-in synthetic trace", () => {
   const result = spawnSync(process.execPath, ["scripts/run-reference-trace.mjs", "traces/v0.1.0/reference-dental-booking-create.json"], {
@@ -14,7 +16,7 @@ test("run-reference-trace replays one checked-in synthetic trace", () => {
 
   assert.equal(result.status, 0, result.stderr || result.stdout);
   assert.match(result.stdout, /Runner: scripts\/run-reference-trace\.mjs/);
-  assert.match(result.stdout, /Scenario: Dental cleaning booked inside a mandate\n\nUser Request: Book a regular cleaning at Carolyn's Dental, up to \$150\.00\. The agent selects Dr\. Mina Lee at 09:00, and the BookingMandate records that exact service, provider, slot, and price cap\.\n\nBooking Mandate: mandate_8f44d4ab-8c56-4f6d-9e0f-d5d3e2d36f88 allows booking\.create; service dental_cleaning; provider dental_dr_lee; schedule dental_midtown; window 2026-07-07T09:00:00\.\.2026-07-07T09:45:00; max \$150\.00\n\nResult: replayed 5 step\(s\)/);
+  assert.match(result.stdout, /Scenario: Dental cleaning booked inside a mandate\n\nUser Request: Book a regular cleaning at Carolyn's Dental, up to \$150\.00\. The agent selects Dr\. Mina Lee at 09:00, and the BookingMandate records that exact service, provider, slot, and price cap\.\n\nBooking Mandate: mandate_8f44d4ab-8c56-4f6d-9e0f-d5d3e2d36f88 allows booking\.create; service dental_cleaning; provider dental_dr_lee; schedule dental_midtown; window 2026-07-07T09:00:00\.\.2026-07-07T09:45:00; max \$150\.00\n\nResult: replayed 6 step\(s\)/);
   assert.match(result.stdout, /Guardrail triggered: none/);
   assert.match(result.stdout, /Trace file: traces\/v0\.1\.0\/reference-dental-booking-create\.json/);
 });
@@ -45,6 +47,24 @@ test("run-reference-trace replays the launch trace gallery by default", () => {
   assert.match(result.stdout, /Idempotency: same key replayed booking bk_01jz7f2szt8h7q6m5n4p3r2v9k; changed payload rejected/);
 });
 
+test("run-reference-trace lints the checked-in Openings trace structure", () => {
+  const trace = JSON.parse(readFileSync(resolve(root, openingsTraceFile), "utf8"));
+  const mandate = trace.mandate;
+  const mandateWindow = `${mandate.earliest_start}..${mandate.latest_end}`;
+
+  const result = spawnSync(process.execPath, ["scripts/run-reference-trace.mjs", openingsTraceFile], {
+    cwd: root,
+    encoding: "utf8"
+  });
+
+  assert.equal(result.status, 0, result.stderr || result.stdout);
+  assert.match(result.stdout, /Scenario: Openings redacted live booking\n\nUser Request: Book one controlled live appointment at the configured Openings business\. Ask for final approval before booking\./);
+  assert.match(result.stdout, new RegExp(`Booking Mandate: ${escapeRegExp(mandate.id)} allows booking\\.create; service service_primary; provider provider_selected; schedule schedule_selected; window ${escapeRegExp(mandateWindow)}; max \\$45\\.00`));
+  assert.match(result.stdout, /Result: recorded 6 (?:step|tool call)\(s\)/);
+  assert.match(result.stdout, /Guardrail triggered: none/);
+  assert.match(result.stdout, /Trace file: traces\/v0\.1\.0\/openings-create\.json/);
+});
+
 test("run-reference-trace can print ANSI color hints when requested", () => {
   const result = spawnSync(process.execPath, ["scripts/run-reference-trace.mjs", "traces/v0.1.0/reference-dental-booking-create.json"], {
     cwd: root,
@@ -58,3 +78,7 @@ test("run-reference-trace can print ANSI color hints when requested", () => {
   assert.match(result.stdout, /\u001b\[36mBooking Mandate:\u001b\[0m mandate_8f44d4ab-8c56-4f6d-9e0f-d5d3e2d36f88/);
   assert.match(result.stdout, /\u001b\[32mGuardrail triggered:\u001b\[0m none/);
 });
+
+function escapeRegExp(value) {
+  return value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+}

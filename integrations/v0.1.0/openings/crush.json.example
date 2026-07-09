@@ -1,0 +1,10 @@
+{
+  "$schema": "https://charm.land/crush.json",
+  "mcp": {
+    "osbp-openings": {
+      "type": "stdio",
+      "command": "node",
+      "args": ["packages/osbp-mcp-server/dist/server.js"]
+    }
+  }
+}

@@ -24,9 +24,9 @@ export type MoneyType = "fixed" | "insurance_dependent" | "quote_required" | "un
 
 export interface Money {
   // Integer amount in the currency's ISO 4217 minor unit. The exponent VARIES
-  // by currency: USD and EUR use 2 places, JPY uses 0, KWD and BHD use 3. It is
-  // NOT always cents. Absent for type "insurance_dependent", "quote_required",
-  // or "unknown", where no fixed amount is known at read time.
+  // by currency: USD and EUR use 2 places, JPY/CLP/VND use 0, and KWD/JOD/TND
+  // use 3. It is NOT always cents. Absent for type "insurance_dependent",
+  // "quote_required", or "unknown", where no fixed amount is known at read time.
   amount_minor?: number;
   // ISO 4217 currency code (e.g., "USD"). Required whenever a Money is present,
   // so cross-currency comparisons can fail closed instead of guessing.
@@ -131,7 +131,8 @@ export interface OperatingHours {
   day: number;
   // 24-hour HH:MM strings ("10:00", "18:00") in the location's local
   // wall-clock time. The IANA tz name lives on the parent (Slot.schedule_timezone
-  // or LocationSchedule.timezone) — these strings have no offset of their own.
+  // or LocationSchedule.timezone); these strings have no offset of their own.
+  // close earlier than open means the period continues into the next calendar day.
   open: string;
   close: string;
 }
@@ -165,7 +166,7 @@ export interface Slot {
   // so treat it as mild personal data.
   provider_image_url?: string;
   // True when the provider has a portfolio of work. Surfaced as an
-  // affordance signal so an agent can offer "want to see Amy's work?"
+  // affordance signal so an agent can offer to show the provider's work
   // without guessing, but treat it as a hint, not a guarantee that any
   // portfolio link or content is currently exposed by OSBP.
   provider_has_portfolio?: boolean;
@@ -223,18 +224,20 @@ export interface Policy {
   // yet enforce or cap this through the mandate; that is roadmap, tied to
   // payment composition.
   no_show_fee?: Money;
-  // Payment expectations (service-level).
+  // Payment expectation for this service/booking context. Platforms may derive
+  // it from service, merchant, location, membership, or booking-policy data.
   payment_requirement?: "none" | "deposit" | "full_prepay" | "unknown";
   // Required deposit as a Money object. amount_minor is in the currency's ISO
   // 4217 minor unit (exponent varies by currency). Checked against
   // BookingMandate.max_extra_fee when payment_requirement is "deposit".
   deposit?: Money;
-  // Verification method the merchant uses for new customers. Determines whether
-  // booking.create may return requires_verification and which channel
-  // verification.send uses. "none" means the platform has no customer
-  // verification step at all: such adapters return verification_not_supported
-  // from verification.send / verification.verify and never emit
-  // requires_verification. "unknown" means the method could not be determined.
+  // Verification method the merchant uses for new customers: which channel
+  // verification.send uses, and whether booking.create is expected to return
+  // requires_verification. "none" declares the platform has no customer
+  // verification step for this service. Declarative, not a guarantee:
+  // platform risk checks can still require verification, so agents handle
+  // requires_verification fail-closed wherever it surfaces. "unknown" means
+  // the method could not be determined.
   verification_method?: "sms" | "email" | "none" | "unknown";
   // Merchant identity / contact / context the agent should be able to present
   // to the user without having to call a separate "describe organization" tool.
@@ -267,6 +270,12 @@ export interface Customer {
   id?: string;
   phone?: string;
   email?: string;
+  // Optional structured name fields for platforms that require separate
+  // "first"/"last" fields. Use display_name for user-facing prose; use these
+  // only when the customer or host supplies them explicitly, because name order
+  // and segmentation are locale-dependent.
+  given_name?: string;
+  family_name?: string;
   display_name?: string;
 }
 
@@ -327,7 +336,10 @@ export interface Booking {
   id: string;
   // Normalized lifecycle status from a closed enum. The adapter maps the
   // platform's native status string onto these values; an unrecognized or
-  // absent platform status becomes "unknown".
+  // absent platform status becomes "unknown". A source-specific create mapper
+  // may document a narrower receipt-snapshot default when the platform just
+  // confirmed creation, but readback paths must not turn absent status into
+  // "booked".
   status?: BookingStatus;
   service_id?: string;
   schedule_id?: string;
@@ -411,7 +423,7 @@ export interface UpstreamMeta {
   deprecation?: string;
   // Sunset header (RFC 8594), verbatim HTTP-date.
   sunset?: string;
-  // RateLimit, RateLimit-Policy, and X-RateLimit-* headers, keyed lowercase.
+  // Retry-After, RateLimit, RateLimit-Policy, and X-RateLimit-* headers, keyed lowercase.
   ratelimit?: Record<string, string>;
 }
 
@@ -436,9 +448,16 @@ export interface AuditEvent {
   result_hash?: string;
 }
 
+export interface AdapterRuntimeDiagnostics {
+  // Per-call runtime details for agents/operators. These are diagnostics about
+  // how this response was produced, not durable booking truth.
+  idempotency?: "local_cache_replay";
+  message?: string;
+}
+
 export type AdapterResult<T> =
-  | { ok: true; value: T }
-  | { ok: false; problem: Problem };
+  | { ok: true; value: T; osbp_runtime?: AdapterRuntimeDiagnostics }
+  | { ok: false; problem: Problem; osbp_runtime?: AdapterRuntimeDiagnostics };
 
 export interface BookingAdapter {
   // Static identity of the booking platform this adapter speaks to, recorded

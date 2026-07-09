@@ -1,0 +1,32 @@
+cff-version: 1.2.0
+message: "If you use OSBP, please cite it as below."
+title: "Open Service Booking Protocol (OSBP)"
+abstract: >-
+  An open protocol for AI agents to book service appointments under a
+  user-approved, scoped mandate, over the Model Context Protocol (MCP).
+type: software
+authors:
+  - family-names: Volk
+    given-names: Andy
+    orcid: "https://orcid.org/0009-0004-5889-9685"
+    affiliation: "Andy[x]"
+version: "0.1.0"
+date-released: "2026-07-08"
+license:
+  - Apache-2.0
+  - CC-BY-4.0
+repository-code: "https://github.com/osbp-dev/osbp"
+url: "https://osbp.dev"
+keywords:
+  - AI agents
+  - service booking
+  - Model Context Protocol
+  - MCP
+  - open protocol
+  - booking mandate
+# After Zenodo mints the DOI, uncomment and fill in so GitHub's "Cite this
+# repository" and Zenodo both show a resolvable identifier:
+# identifiers:
+#   - type: doi
+#     value: "10.5281/zenodo.XXXXXXX"
+#     description: "Concept DOI (resolves to the latest version)"

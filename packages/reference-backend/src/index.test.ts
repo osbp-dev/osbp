@@ -1,7 +1,10 @@
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
 import { createHash } from "node:crypto";
-import { describe, it } from "node:test";
+import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import { describe, it, mock } from "node:test";
 import { fileURLToPath } from "node:url";
 import type { AdapterResult, BookingCreateInput, BookingMandate, Money, Receipt, Service, Slot } from "@osbp/core";
 import {
@@ -159,6 +162,82 @@ describe("SyntheticBookingAdapter", { concurrency: false }, () => {
         assert.equal(status.value.starts_at_local, `${input.date}T${input.time}:00`);
         assert.ok(status.value.starts_at);
       }
+    });
+  });
+
+  it("shows the merchant-visible customer name in final approval", async () => {
+    await withServer(async (server) => {
+      const fixture = ORG_FIXTURES[0];
+      const adapter = adapterFor(server, fixture.id);
+      const input = await createInputFor(adapter, fixture, fixture.happyServiceId, "approval-name");
+
+      const result = await adapter.createBooking({
+        ...input,
+        customer: {
+          ...input.customer,
+          display_name: "Morgan Patel"
+        }
+      });
+
+      assert.equal(result.ok, false);
+      if (result.ok) return;
+      const [summaryText = ""] = result.problem.message.split("Agent retry instruction:");
+      assert.match(summaryText, /Book .* for Morgan Patel/);
+      assert.doesNotMatch(summaryText, /approval\.token=/);
+    });
+  });
+
+  it("uses display names rather than raw ids in the final approval summary", async () => {
+    await withServer(async (server) => {
+      const fixture = ORG_FIXTURES[0];
+      const adapter = adapterFor(server, fixture.id);
+      const input = await createInputFor(adapter, fixture, fixture.happyServiceId, "approval-display-names");
+
+      const result = await adapter.createBooking(input);
+
+      assert.equal(result.ok, false);
+      if (result.ok) return;
+      const [summaryText = ""] = result.problem.message.split("Agent retry instruction:");
+      assert.match(summaryText, /with Dr\. Mina Lee at Midtown Dental Suite/);
+      assert.doesNotMatch(summaryText, /dental_dr_lee/);
+      assert.doesNotMatch(summaryText, /dental_midtown/);
+      assert.doesNotMatch(summaryText, /Payment required: [a-z_]+/);
+    });
+  });
+
+  it("shows surfaced conditional fees in final approval", async () => {
+    await withServer(async (server) => {
+      const noShowFixture = ORG_FIXTURES[0];
+      const noShowAdapter = adapterFor(server, noShowFixture.id);
+      const noShowInput = await createInputFor(
+        noShowAdapter,
+        noShowFixture,
+        noShowFixture.happyServiceId,
+        "approval-no-show-fee"
+      );
+
+      const noShowResult = await noShowAdapter.createBooking(noShowInput);
+      assert.equal(noShowResult.ok, false);
+      if (noShowResult.ok) return;
+      const [noShowSummary = ""] = noShowResult.problem.message.split("Agent retry instruction:");
+      assert.match(noShowSummary, /No-show fee: .*50\.00/);
+      assert.doesNotMatch(noShowSummary, /capped by the BookingMandate/i);
+
+      const cancellationFixture = ORG_FIXTURES[2];
+      const cancellationAdapter = adapterFor(server, cancellationFixture.id);
+      const cancellationInput = await createInputFor(
+        cancellationAdapter,
+        cancellationFixture,
+        cancellationFixture.happyServiceId,
+        "approval-cancellation-fee"
+      );
+
+      const cancellationResult = await cancellationAdapter.createBooking(cancellationInput);
+      assert.equal(cancellationResult.ok, false);
+      if (cancellationResult.ok) return;
+      const [cancellationSummary = ""] = cancellationResult.problem.message.split("Agent retry instruction:");
+      assert.match(cancellationSummary, /Cancellation fee: .*30\.00/);
+      assert.doesNotMatch(cancellationSummary, /capped by the BookingMandate/i);
     });
   });
 
@@ -365,6 +444,12 @@ describe("SyntheticBookingAdapter", { concurrency: false }, () => {
 
       assert.equal(initial.ok ? undefined : initial.problem.code, "requires_verification");
 
+      const wrongCode = await adapter.createBooking({
+        ...approved,
+        verification_code: "000000"
+      });
+      assert.equal(wrongCode.ok ? undefined : wrongCode.problem.code, "verification_failed");
+
       const sent = await adapter.sendVerification({
         customer: input.customer,
         purpose: `booking:${fixture.id}`
@@ -468,6 +553,28 @@ describe("SyntheticBookingAdapter", { concurrency: false }, () => {
     });
   });
 
+  it("does not fabricate provider evidence from an unscoped availability slot", async () => {
+    await withServer(async (server) => {
+      const fixture = ORG_FIXTURES.find((candidate) => candidate.id === "org_01jz7ay6r8dd6yskkpt8rvhk8z");
+      assert.ok(fixture);
+      const adapter = adapterFor(server, fixture.id);
+      const base = await createInputFor(adapter, fixture, fixture.happyServiceId, "provider-mismatch");
+      const mismatchedProvider = {
+        ...base,
+        provider_id: "dental_hygienist_rivera",
+        mandate: {
+          ...base.mandate,
+          provider_ids: ["dental_hygienist_rivera"]
+        }
+      };
+
+      const result = await confirmAndBook(adapter, mismatchedProvider);
+
+      assert.equal(result.ok, false);
+      assert.equal(result.ok ? undefined : result.problem.code, "slot_taken");
+    });
+  });
+
   it("replays matching idempotency keys and rejects conflicting payloads locally", async () => {
     await withServer(async (server) => {
       const fixture = ORG_FIXTURES[0];
@@ -487,6 +594,33 @@ describe("SyntheticBookingAdapter", { concurrency: false }, () => {
       assert.deepEqual(replay, first);
       assert.equal(conflict.ok ? undefined : conflict.problem.code, "idempotency_conflict");
     });
+  });
+
+  it("ignores malformed persisted idempotency entries instead of treating them as conflicts", async () => {
+    const storeDir = mkdtempSync(join(tmpdir(), "osbp-reference-idem-"));
+    const storePath = join(storeDir, "bookings.json");
+    const warn = mock.method(console, "warn", () => undefined);
+    try {
+      writeFileSync(storePath, JSON.stringify({ stale_key: { payloadHash: 123 } }));
+      await withServer(async (server) => {
+        const fixture = ORG_FIXTURES[0];
+        const adapter = new SyntheticBookingAdapter({
+          apiBaseUrl: server.url,
+          organizationId: fixture.id,
+          idempotencyStorePath: storePath
+        });
+        const input = await createInputFor(adapter, fixture, fixture.happyServiceId, "persisted-idempotency");
+
+        const result = await confirmAndBook(adapter, { ...input, idempotency_key: "stale_key" });
+
+        assert.equal(result.ok, true);
+        const persisted = JSON.parse(readFileSync(storePath, "utf8")) as Record<string, unknown>;
+        assert.ok(persisted.stale_key);
+      });
+    } finally {
+      warn.mock.restore();
+      rmSync(storeDir, { recursive: true, force: true });
+    }
   });
 
   it("derives DST-correct RFC 3339 instants from merchant-local wall-clock values", () => {
@@ -541,9 +675,13 @@ describe("SyntheticBookingAdapter", { concurrency: false }, () => {
       conformance_fixed_eur: { amount_minor: 9000, currency: "EUR" },
       conformance_fixed_gbp: { amount_minor: 8000, currency: "GBP" },
       conformance_fixed_jpy: { amount_minor: 12000, currency: "JPY" },
-      conformance_fixed_kwd: { amount_minor: 12500, currency: "KWD" }
+      conformance_fixed_kwd: { amount_minor: 12500, currency: "KWD" },
+      conformance_fixed_clp: { amount_minor: 45000, currency: "CLP" },
+      conformance_fixed_jod: { amount_minor: 45000, currency: "JOD" }
     });
     assert.equal(services.get(REFERENCE_CONFORMANCE_FIXTURES.services.fixed_jpy)?.price.display, "¥12,000");
+    assert.equal(services.get("conformance_fixed_clp")?.price.display, "CLP 45,000");
+    assert.equal(services.get("conformance_fixed_jod")?.price.display, "JOD 45.000");
     assert.equal(services.get(REFERENCE_CONFORMANCE_FIXTURES.services.fixed_usd)?.options?.[0]?.duration, "PT15M");
     assert.equal(services.get(REFERENCE_CONFORMANCE_FIXTURES.services.insurance_dependent)?.price.amount_minor, undefined);
     assert.equal(services.get(REFERENCE_CONFORMANCE_FIXTURES.services.quote_required)?.price.amount_minor, undefined);
@@ -569,6 +707,8 @@ describe("SyntheticBookingAdapter", { concurrency: false }, () => {
     assert.match(first.stdout, /Phil's Spa/);
     assert.equal(matchCount(first.stdout, /Server authorization gate: PASS/g), 4);
     assert.equal(matchCount(first.stdout, /booking\.create/g), 4);
+    assert.equal(matchCount(first.stdout, /Final approval gate: requires_user_confirmation/g), 4);
+    assert.equal(matchCount(first.stdout, /User approves shown summary \(simulated\)/g), 4);
     assert.match(first.stdout, /Server authorization gate: REJECT/);
     assert.match(first.stdout, /price_exceeds_mandate/);
     assert.match(first.stdout, /validateMandate\(\)/);
@@ -589,6 +729,8 @@ describe("SyntheticBookingAdapter", { concurrency: false }, () => {
     assert.match(result.stdout, /MANDATE/);
     assert.match(result.stdout, /LOOK/);
     assert.match(result.stdout, /SERVER AUTHORIZATION GATE/);
+    assert.match(result.stdout, /FINAL APPROVAL GATE/);
+    assert.match(result.stdout, /requires_user_confirmation/);
     assert.match(result.stdout, /PASS/);
     assert.match(result.stdout, /REJECT/);
     assert.match(result.stdout, /price_exceeds_mandate/);

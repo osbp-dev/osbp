@@ -8,6 +8,7 @@ import type {
   BookingStatusInput,
   Customer,
   Money,
+  PendingApproval,
   Policy,
   PolicyExplainInput,
   Receipt,
@@ -21,12 +22,13 @@ import type {
 // The synthetic target uses the core validator to behave like a conforming
 // adapter. runConformance itself grades adapters black-box by returned
 // AdapterResult problem codes.
-import { validateMandate } from "@osbp/core";
+import { requireApproval, validateMandate } from "@osbp/core";
+import { randomUUID } from "node:crypto";
 
 async function confirmAndBook(adapter: BookingAdapter, input: BookingCreateInput): Promise<AdapterResult<Receipt>> {
-  // Transparent final-confirmation handshake: tolerate adapters that gate
-  // booking.create behind an approval token, and pass through adapters that do
-  // not, so the same check grades both.
+  // Transparent final-confirmation handshake for happy-path checks. The
+  // dedicated approval.requires_user_confirmation.final_approval check below
+  // is what grades whether the adapter actually gates the first create.
   const first = await adapter.createBooking(input);
   if (first.ok || first.problem.code !== "requires_user_confirmation") {
     return first;
@@ -234,6 +236,7 @@ export class ConformanceSyntheticAdapter implements BookingAdapter {
   private mode: ConformanceScenarioMode;
   private readonly idempotency = new Map<string, SyntheticIdempotencyEntry>();
   private readonly bookings = new Map<string, Booking>();
+  private readonly pendingApprovals = new Map<string, PendingApproval>();
   private bookingCounter = 0;
 
   constructor(options: ConformanceSyntheticAdapterOptions = {}) {
@@ -248,6 +251,7 @@ export class ConformanceSyntheticAdapter implements BookingAdapter {
     this.mode = "normal";
     this.idempotency.clear();
     this.bookings.clear();
+    this.pendingApprovals.clear();
     this.bookingCounter = 0;
   }
 
@@ -298,7 +302,7 @@ export class ConformanceSyntheticAdapter implements BookingAdapter {
   }
 
   async createBooking(input: BookingCreateInput): Promise<AdapterResult<Receipt>> {
-    const payloadHash = stableJson({ ...input, verification_code: undefined });
+    const payloadHash = stableJson(redactTransientCreateFields(input));
     const cached = this.idempotency.get(input.idempotency_key);
     if (cached) {
       return cached.payload_hash === payloadHash ? ok(clone(cached.receipt)) : problem(
@@ -339,6 +343,18 @@ export class ConformanceSyntheticAdapter implements BookingAdapter {
       return { ok: false, problem: validation.problem };
     }
 
+    const approvalGate = requireApproval({
+      approval: input.approval,
+      payloadHash,
+      summary: syntheticApprovalSummary(input, service, slot, policy),
+      store: this.pendingApprovals,
+      now: Date.now(),
+      newToken: randomUUID
+    });
+    if (!approvalGate.ok) {
+      return approvalGate;
+    }
+
     if (policy.verification_method !== "none" && !input.verification_code) {
       return problem("requires_verification", "Synthetic customer verification required before booking", true);
     }
@@ -371,6 +387,7 @@ export class ConformanceSyntheticAdapter implements BookingAdapter {
       receipt,
       booking
     });
+    this.pendingApprovals.delete(payloadHash);
 
     return ok(clone(receipt));
   }
@@ -540,7 +557,7 @@ const checkDefinitions: CheckDefinition[] = [
   },
   {
     id: "shape.slot.denormalized_context",
-    requirement: "Slot carries denormalized organization, schedule, provider, and location context for presentation without round-trips.",
+    requirement: "Slot carries denormalized organization, schedule, provider, and location context for presentation without round-trips when the platform provides it.",
     spec_ref: `${SPEC_SCHEMA}#core-objects`,
     run: async (context) => {
       const slot = await requireFirstSlot(context);
@@ -549,11 +566,11 @@ const checkDefinitions: CheckDefinition[] = [
       }
       const failures: string[] = [];
       requireNonEmptyString(failures, "Slot.organization_id", slot.value.organization_id);
-      requireNonEmptyString(failures, "Slot.schedule_name", slot.value.schedule_name);
-      requireFiniteNumber(failures, "Slot.schedule_latitude", slot.value.schedule_latitude);
-      requireFiniteNumber(failures, "Slot.schedule_longitude", slot.value.schedule_longitude);
-      requireNonEmptyString(failures, "Slot.provider_name", slot.value.provider_name);
-      requireNonEmptyString(failures, "Slot.organization_name", slot.value.organization_name);
+      requireOptionalNonEmptyString(failures, "Slot.schedule_name", slot.value.schedule_name);
+      requireOptionalFiniteNumber(failures, "Slot.schedule_latitude", slot.value.schedule_latitude);
+      requireOptionalFiniteNumber(failures, "Slot.schedule_longitude", slot.value.schedule_longitude);
+      requireOptionalNonEmptyString(failures, "Slot.provider_name", slot.value.provider_name);
+      requireOptionalNonEmptyString(failures, "Slot.organization_name", slot.value.organization_name);
       return failures.length === 0 ? pass() : fail(failures.join("; "));
     }
   },
@@ -636,12 +653,144 @@ const checkDefinitions: CheckDefinition[] = [
       return failures.length === 0 ? pass() : fail(failures.join("; "));
     }
   },
+  {
+    id: "approval.requires_user_confirmation.final_approval",
+    requirement: "A valid booking.create without approval returns requires_user_confirmation before creating a booking.",
+    spec_ref: `${SPEC_README}#bookingcreate`,
+    run: async (context) => {
+      const result = await callAdapter(() => context.adapter.createBooking(buildCreateInput(context.fixtures, {
+        idempotency_key: "approval_final_confirmation"
+      })));
+      if (result.kind === "throw") {
+        return fail(`adapter threw: ${describeThrown(result.threw)}`);
+      }
+      const envelope = validateResultSchema(context, result.result);
+      if (envelope.status !== "pass") {
+        return envelope;
+      }
+      if (result.result.ok) {
+        return fail("booking.create succeeded without final approval");
+      }
+      const problemShape = validateProblemSchema(context, result.result.problem);
+      if (problemShape.status !== "pass") {
+        return problemShape;
+      }
+      if (result.result.problem.code !== "requires_user_confirmation") {
+        return fail(`expected Problem requires_user_confirmation, got ${result.result.problem.code}`);
+      }
+      return result.result.problem.message.includes("approval.token=")
+        ? pass()
+        : fail("requires_user_confirmation did not include an approval token for the approved retry");
+    }
+  },
+  {
+    id: "approval.rejects_forged_token",
+    requirement: "An approval token that was not issued for the pending booking cannot authorize booking.create.",
+    spec_ref: `${SPEC_README}#bookingcreate`,
+    run: async (context) => {
+      const input = buildCreateInput(context.fixtures, { idempotency_key: "approval_forged_token" });
+      const first = await requireApprovalChallenge(context, input);
+      if (first.status !== "pass") {
+        return first;
+      }
+      if (!first.token) {
+        return fail("approval challenge did not return a token");
+      }
+      return expectProblem(
+        context,
+        () => context.adapter.createBooking({ ...input, approval: { confirmed: true, token: "forged" } }),
+        "requires_user_confirmation",
+        { retryableMustNotBeFalse: true, messageMustInclude: "approval.token=" }
+      );
+    }
+  },
+  {
+    id: "approval.rejects_token_for_changed_payload",
+    requirement: "An approval token for one payload cannot authorize a different booking payload or idempotency key.",
+    spec_ref: `${SPEC_README}#bookingcreate`,
+    run: async (context) => {
+      const firstInput = buildCreateInput(context.fixtures, { idempotency_key: "approval_payload" });
+      const first = await requireApprovalChallenge(context, firstInput);
+      if (first.status !== "pass") {
+        return first;
+      }
+      const token = first.token;
+      if (!token) {
+        return fail("approval challenge did not return a token");
+      }
+      // Vary a customer-visible identity field, not just the idempotency key:
+      // approval tokens bind the exact pending payload, even when a summary-only
+      // implementation might not mention the customer name.
+      const changedPayload = await expectProblem(
+        context,
+        () => context.adapter.createBooking({
+          ...buildCreateInput(context.fixtures, {
+            idempotency_key: "approval_payload",
+            input: {
+              customer: {
+                ...context.fixtures.customer,
+                display_name: "Changed Customer"
+              }
+            }
+          }),
+          approval: { confirmed: true, token }
+        }),
+        "requires_user_confirmation",
+        { retryableMustNotBeFalse: true, messageMustInclude: "approval.token=" }
+      );
+      if (changedPayload.status !== "pass") {
+        return changedPayload;
+      }
+      return expectProblem(
+        context,
+        () => context.adapter.createBooking({
+          ...buildCreateInput(context.fixtures, { idempotency_key: "approval_payload_new_key" }),
+          approval: { confirmed: true, token }
+        }),
+        "requires_user_confirmation",
+        { retryableMustNotBeFalse: true, messageMustInclude: "approval.token=" }
+      );
+    }
+  },
+  {
+    id: "approval.rejects_reused_token_after_success",
+    requirement: "A token that authorized one successful create cannot authorize a second create under a new idempotency key.",
+    spec_ref: `${SPEC_README}#bookingcreate`,
+    run: async (context) => {
+      const firstInput = buildCreateInput(context.fixtures, { idempotency_key: "approval_reuse_a" });
+      const first = await requireApprovalChallenge(context, firstInput);
+      if (first.status !== "pass") {
+        return first;
+      }
+      const token = first.token;
+      if (!token) {
+        return fail("approval challenge did not return a token");
+      }
+      const booked = await callAdapter(() => context.adapter.createBooking({
+        ...firstInput,
+        approval: { confirmed: true, token }
+      }));
+      if (booked.kind === "throw" || !booked.result.ok) {
+        return fail(`approved create did not book: ${booked.kind === "throw" ? describeThrown(booked.threw) : summarizeResult(booked.result)}`);
+      }
+      return expectProblem(
+        context,
+        () => context.adapter.createBooking({
+          ...buildCreateInput(context.fixtures, { idempotency_key: "approval_reuse_b" }),
+          approval: { confirmed: true, token }
+        }),
+        "requires_user_confirmation",
+        { retryableMustNotBeFalse: true, messageMustInclude: "approval.token=" }
+      );
+    }
+  },
   problemCheck("mandate.mandate_expired", "mandate_expired", "Expired mandates fail closed.", { mandate: { expires_at: "2000-01-01T00:00:00Z" } }),
   problemCheck("mandate.invalid_mandate.expires_at", "invalid_mandate", "Naked expires_at values fail as invalid_mandate.", { mandate: { expires_at: "2030-05-01T13:00:00" } }),
   problemCheck("mandate.invalid_mandate.wall_clock_offset", "invalid_mandate", "Offset-carrying wall-clock mandate fields fail as invalid_mandate.", { mandate: { earliest_start: "2030-05-02T09:00:00Z" } }),
   problemCheck("mandate.action_not_allowed", "action_not_allowed", "booking.create must be included in allowed_actions.", { mandate: { allowed_actions: ["service.describe"] } }),
   problemCheck("mandate.organization_not_allowed", "organization_not_allowed", "Selected organization must be inside mandate scope.", { mandate: { organization_id: "org_other" } }),
   problemCheck("mandate.service_not_allowed", "service_not_allowed", "Selected service must be inside mandate scope.", { mandate: { service_ids: ["svc_other"] } }),
+  problemCheck("mandate.service_empty_scope_denies", "service_not_allowed", "An empty service_ids allow-list denies every selected service; omit the field for unrestricted service scope.", { mandate: { service_ids: [] } }),
   problemCheck("mandate.schedule_not_allowed", "schedule_not_allowed", "Selected schedule must be inside mandate scope.", { mandate: { schedule_ids: ["sched_other"] } }),
   problemCheck("mandate.provider_unknown", "provider_unknown", "Provider-scoped mandates fail closed when the slot has no provider id.", { input: { provider_id: "" } }),
   problemCheck("mandate.provider_not_allowed", "provider_not_allowed", "Selected provider must be inside mandate scope.", { input: { provider_id: "prov_other" } }),
@@ -656,12 +805,44 @@ const checkDefinitions: CheckDefinition[] = [
     service_key: "fixed_gbp",
     mandate: { max_price: { amount_minor: 20000, currency: "USD" } }
   }),
-  problemCheck("mandate.requires_user_confirmation.unknown_payment", "requires_user_confirmation", "Unknown payment requirements fail closed before mutation.", { service_key: "unknown_payment" }),
-  problemCheck("mandate.requires_user_confirmation.insurance_dependent", "requires_user_confirmation", "Insurance-dependent prices without fixed amount_minor require user confirmation.", { service_key: "insurance_dependent" }),
-  problemCheck("mandate.requires_user_confirmation.quote_required", "requires_user_confirmation", "Quote-required prices without fixed amount_minor require user confirmation.", { service_key: "quote_required" }),
-  problemCheck("mandate.requires_payment_handoff.deposit", "requires_payment_handoff", "Deposit requirements route to payment handoff in v0.1.0.", { service_key: "deposit" }),
-  problemCheck("mandate.requires_payment_handoff.full_prepay", "requires_payment_handoff", "Full prepayment requirements route to payment handoff in v0.1.0.", { service_key: "full_prepay" }),
+  problemCheck("mandate.requires_user_confirmation.unknown_payment", "requires_user_confirmation", "Unknown payment requirements fail closed before mutation.", {
+    service_key: "unknown_payment",
+    terminalConfirmation: true
+  }),
+  problemCheck("mandate.requires_user_confirmation.insurance_dependent", "requires_user_confirmation", "Insurance-dependent prices without fixed amount_minor require user confirmation.", {
+    service_key: "insurance_dependent",
+    terminalConfirmation: true
+  }),
+  problemCheck("mandate.requires_user_confirmation.quote_required", "requires_user_confirmation", "Quote-required prices without fixed amount_minor require user confirmation.", {
+    service_key: "quote_required",
+    terminalConfirmation: true
+  }),
+  problemCheck("mandate.requires_payment_handoff.deposit", "requires_payment_handoff", "Deposit requirements route to payment handoff when the mandate does not explicitly allow policy fees.", { service_key: "deposit" }),
+  problemCheck("mandate.policy_fee_exceeds_mandate", "policy_fee_exceeds_mandate", "Required payment or policy fees above max_extra_fee fail closed when fees are allowed.", {
+    service_key: "deposit",
+    mandate: { allow_policy_fee: true }
+  }),
+  problemCheck("mandate.requires_payment_handoff.full_prepay", "requires_payment_handoff", "Full prepayment requirements route to payment handoff when the mandate does not explicitly allow policy fees.", { service_key: "full_prepay" }),
   problemCheck("mandate.requires_consultation_handoff", "requires_consultation_handoff", "Consultation or quote workflows route to handoff instead of booking.", { service_key: "consultation" }),
+  {
+    id: "mandate.organization_id_reachable",
+    requirement: "policy.explain exposes organization.id so an agent can construct BookingMandate.organization_id from read results.",
+    spec_ref: `${SPEC_README}#policyexplain`,
+    run: async (context) => {
+      const policy = await callAdapter(() => context.adapter.explainPolicy({
+        service_id: context.fixtures.services.fixed_usd
+      }));
+      if (policy.kind === "throw") {
+        return fail(`adapter threw: ${describeThrown(policy.threw)}`);
+      }
+      if (!policy.result.ok) {
+        return fail(`policy.explain failed: ${summarizeResult(policy.result)}`);
+      }
+      return policy.result.value.organization?.id === context.fixtures.organization_id
+        ? pass()
+        : fail(`Policy.organization.id expected ${context.fixtures.organization_id}, got ${describeValue(policy.result.value.organization?.id)}`);
+    }
+  },
   {
     id: "idempotency.replay_same_payload",
     requirement: "The same idempotency_key with the same payload replays the same receipt.",
@@ -709,7 +890,12 @@ const checkDefinitions: CheckDefinition[] = [
         service_key: "verification"
       });
       const approved = await approveInput(context.adapter, input);
-      const initial = await expectProblem(context, () => context.adapter.createBooking(approved), "requires_verification");
+      const initial = await expectProblem(
+        context,
+        () => context.adapter.createBooking(approved),
+        "requires_verification",
+        { retryableMustNotBeFalse: true }
+      );
       if (initial.status !== "pass") {
         return initial;
       }
@@ -720,10 +906,32 @@ const checkDefinitions: CheckDefinition[] = [
       if (sent.kind === "throw" || !sent.result.ok || sent.result.value.sent !== true) {
         return fail(`verification.send did not return a sent challenge: ${sent.kind === "throw" ? describeThrown(sent.threw) : summarizeResult(sent.result)}`);
       }
-      const booked = await callAdapter(() => context.adapter.createBooking({
+      const wrongCode = await expectProblem(
+        context,
+        () => context.adapter.createBooking({
+          ...approved,
+          verification_code: "000000"
+        }),
+        "verification_failed"
+      );
+      if (wrongCode.status !== "pass") {
+        return wrongCode;
+      }
+      let booked = await callAdapter(() => context.adapter.createBooking({
         ...approved,
         verification_code: "123456"
       }));
+      if (
+        booked.kind === "result" &&
+        !booked.result.ok &&
+        booked.result.problem.code === "requires_user_confirmation"
+      ) {
+        const approvedRetry = await approveInput(context.adapter, input);
+        booked = await callAdapter(() => context.adapter.createBooking({
+          ...approvedRetry,
+          verification_code: "123456"
+        }));
+      }
       if (booked.kind === "throw" || !booked.result.ok) {
         return fail(`retry with verification_code did not book: ${booked.kind === "throw" ? describeThrown(booked.threw) : summarizeResult(booked.result)}`);
       }
@@ -771,6 +979,7 @@ interface ProblemCheckConfig {
   service_key?: keyof ConformanceFixtures["services"];
   mandate?: Partial<BookingMandate>;
   input?: Partial<BookingCreateInput>;
+  terminalConfirmation?: boolean;
 }
 
 function problemCheck(
@@ -791,7 +1000,10 @@ function problemCheck(
         mandate: config.mandate,
         input: config.input
       })),
-      expectedCode
+      expectedCode,
+      config.terminalConfirmation
+        ? { retryableMustNotBeTrue: true, messageMustNotInclude: "approval.token=" }
+        : undefined
     )
   };
 }
@@ -811,7 +1023,8 @@ async function runControlledProblem(
     return await expectProblem(
       { ...context, adapter: controlledAdapter },
       () => confirmAndBook(controlledAdapter, buildCreateInput(context.fixtures, { idempotency_key: idempotencyKey })),
-      expectedCode
+      expectedCode,
+      { retryableMustNotBeFalse: true }
     );
   } finally {
     resetControlledAdapter(controlledAdapter);
@@ -847,7 +1060,13 @@ function resetControlledAdapter(adapter: BookingAdapter): void {
 async function expectProblem<T>(
   context: CheckContext,
   operation: () => Promise<AdapterResult<T>>,
-  expectedCode: string
+  expectedCode: string,
+  options: {
+    retryableMustNotBeTrue?: boolean;
+    retryableMustNotBeFalse?: boolean;
+    messageMustInclude?: string;
+    messageMustNotInclude?: string;
+  } = {}
 ): Promise<CheckOutcome> {
   const result = await callAdapter(operation);
   if (result.kind === "throw") {
@@ -864,9 +1083,51 @@ async function expectProblem<T>(
   if (problemShape.status !== "pass") {
     return problemShape;
   }
-  return result.result.problem.code === expectedCode
-    ? pass()
-    : fail(`expected Problem ${expectedCode}, got ${result.result.problem.code}`);
+  if (result.result.problem.code !== expectedCode) {
+    return fail(`expected Problem ${expectedCode}, got ${result.result.problem.code}`);
+  }
+  if (options.retryableMustNotBeTrue && result.result.problem.retryable === true) {
+    return fail(`Problem ${expectedCode} must not be retryable`);
+  }
+  if (options.retryableMustNotBeFalse && result.result.problem.retryable === false) {
+    return fail(`Problem ${expectedCode} must be retryable or omit retryable=false`);
+  }
+  if (options.messageMustInclude && !result.result.problem.message.includes(options.messageMustInclude)) {
+    return fail(`Problem ${expectedCode} message did not include ${options.messageMustInclude}`);
+  }
+  if (options.messageMustNotInclude && result.result.problem.message.includes(options.messageMustNotInclude)) {
+    return fail(`Problem ${expectedCode} message must not include ${options.messageMustNotInclude}`);
+  }
+  for (const forbidden of forbiddenProblemMessageValues(context.fixtures)) {
+    if (result.result.problem.message.includes(forbidden)) {
+      return fail(`Problem ${expectedCode} message must not include fixture contact value ${forbidden}`);
+    }
+  }
+  return pass();
+}
+
+function forbiddenProblemMessageValues(fixtures: ConformanceFixtures): string[] {
+  return [fixtures.customer.phone, fixtures.customer.email].filter(
+    (value): value is string => typeof value === "string" && value.length > 0
+  );
+}
+
+async function requireApprovalChallenge(
+  context: CheckContext,
+  input: BookingCreateInput
+): Promise<CheckOutcome & { token?: string }> {
+  const result = await callAdapter(() => context.adapter.createBooking(input));
+  if (result.kind === "throw") {
+    return valueFail(`adapter threw: ${describeThrown(result.threw)}`);
+  }
+  if (result.result.ok) {
+    return valueFail("booking.create succeeded without first returning an approval challenge");
+  }
+  if (result.result.problem.code !== "requires_user_confirmation") {
+    return valueFail(`expected requires_user_confirmation, got ${result.result.problem.code}`);
+  }
+  const token = result.result.problem.message.match(/approval\.token="([^"]+)"/)?.[1];
+  return token ? { ...pass(), token } : valueFail("requires_user_confirmation did not include approval.token");
 }
 
 async function createReceipt(context: CheckContext, idempotencyKey: string): Promise<CheckOutcome & { value: Receipt }> {
@@ -1296,9 +1557,21 @@ function requireNonEmptyString(failures: string[], path: string, value: unknown)
   }
 }
 
+function requireOptionalNonEmptyString(failures: string[], path: string, value: unknown): void {
+  if (value !== undefined) {
+    requireNonEmptyString(failures, path, value);
+  }
+}
+
 function requireFiniteNumber(failures: string[], path: string, value: unknown): void {
   if (typeof value !== "number" || !Number.isFinite(value)) {
     failures.push(`${path} expected finite number, got ${describeValue(value)}`);
+  }
+}
+
+function requireOptionalFiniteNumber(failures: string[], path: string, value: unknown): void {
+  if (value !== undefined) {
+    requireFiniteNumber(failures, path, value);
   }
 }
 
@@ -1452,6 +1725,25 @@ function syntheticPaymentRequirement(serviceId: string): NonNullable<Policy["pay
 
 function normalizeTime(value: string): string {
   return value.length === 5 ? `${value}:00` : value;
+}
+
+function redactTransientCreateFields(input: BookingCreateInput): unknown {
+  const { approval: _approval, verification_code: _verificationCode, ...payload } = input;
+  return payload;
+}
+
+function syntheticApprovalSummary(input: BookingCreateInput, service: Service, slot: Slot, policy: Policy): string {
+  const price = slot.price ?? service.price;
+  const priceText =
+    price?.display ??
+    (price?.amount_minor !== undefined
+      ? `${price.amount_minor} ${price.currency} minor units`
+      : "the selected price");
+  const payment =
+    policy.payment_requirement && policy.payment_requirement !== "none"
+      ? `Payment requirement: ${policy.payment_requirement}.`
+      : "No upfront payment or deposit is required to book.";
+  return `Book ${service.name} on ${input.date} at ${input.time} merchant-local time for ${priceText}. ${payment}`;
 }
 
 function stableJson(value: unknown): string {

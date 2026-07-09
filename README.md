@@ -13,7 +13,7 @@ The challenge is broad: dentists, notaries, auto shops, spas, clinics, classes, 
 
 OSBP's bet is that agents do not need unchecked write access to all of them. They need a common, inspectable way to look up services, explain policies, ask for bounded permission, book only inside that permission, and fail closed when the selected appointment no longer fits. OSBP v0.1.0 proves the smallest useful version of that method.
 
-The v0.1.0 release demonstrates the core claim: an agent-shaped flow books a synthetic appointment through OSBP, bounded by a mandate the user approved first. The agent can search, compare, and prepare freely. It can mutate only inside the mandate.
+The v0.1.0 release demonstrates the core claim: an agent-shaped flow books an appointment through OSBP, bounded by a mandate the user approved first. The agent can search, compare, and prepare freely. It can mutate only inside the mandate. The credential-free reference backend proves the guardrails without secrets; the worked real-platform path proves the same boundary against a booking platform when an operator supplies their own business configured for safe bookings.
 
 ## Where OSBP Fits
 
@@ -25,13 +25,15 @@ Customer <-> AI agent <-> OSBP server <-> booking platform
 
 OSBP does not replace MCP, OpenAPI, or a booking platform's native API. The booking platform remains the system of record. OSBP validates authority, translates tool calls, and records an audit trail.
 
+OSBP adds a missing trust boundary for AI booking: an agent may create a provider-bound service appointment ONLY when the request fits inside an already-user-approved `BookingMandate` covering service, provider, time, price, and policy.
+
 Payment authority is a separate layer. AP2, ACP, and UCP are converging on how agents conduct commerce and obtain authorization to spend. OSBP authorizes the booking, not the payment, and is intentionally scoped to compose with payment-authorization protocols rather than duplicate them.
 
 One adjacent gap, named here on purpose: agents depend on service APIs that cannot yet describe their own versions, lifecycles, or limits to a machine, and no standard does this today. OSBP composes the web standards that exist (deprecation and sunset signaling, lifecycle capture, explicit version pinning) and shows the rest in practice in its reference adapter.
 
 ## Core Concepts
 
-- **`BookingMandate`** is the user-approved authorization every mutation rides inside. It records who approved the booking, the allowed organization, service, provider, schedule, and time window, the price and policy-fee caps, the allowed actions, and an expiry. The agent may read, compare, and prepare freely; it can mutate only within these bounds.
+- **`BookingMandate`** is the user-approved authorization every booking mutation rides inside. It records who approved the booking, the allowed organization, service, provider, schedule, and time window, the price and policy-fee caps, the allowed actions, and an expiry. The agent may read, compare, and prepare freely; it can create a booking only within these bounds.
 - **Fail closed.** The server validates the mandate, idempotency, and policy before any write to the booking platform. An out-of-bounds or unverifiable request is rejected or routed to a structured handoff, never guessed past.
 - **`Problem`** is the stable, platform-independent error shape returned by failed tool calls: `{ code, message, retryable? }`. Agents branch on `code` (for example `price_exceeds_mandate`, `requires_verification`, `slot_taken`), so the same handling works across every adapter.
 
@@ -56,11 +58,11 @@ The reference implementation includes:
 
 - a TypeScript protocol core with mandate validation
 - a credential-free synthetic reference backend with four unrelated verticals
-- a reusable conformance kit that cross-checks the reference backend 44/44
+- a reusable conformance kit that cross-checks the reference backend with the full check battery
 - an adapter starter kit that compiles and fails closed until implemented
-- redacted audit events and a credential-free reference trace gallery
+- redacted audit snapshots for structured tool data and a credential-free reference trace gallery
 
-This is the **minimal public cut**: the platform-neutral spec, the protocol core, the credential-free reference backend, the conformance kit, and an adapter starter. It demonstrates protocol behavior through the reference backend and `npm run demo` (a CLI), not through a hosted MCP server. OSBP defines its tools as MCP tools (see the [spec](docs/spec/v0.1.0/README.md)), but the stdio MCP server package and a worked real-platform adapter are deferred to a later cut; what this cut proves is the authorization model, the fail-closed guardrails, and the adapter contract.
+This is the **v0.1.0 public cut**: the platform-neutral spec, the protocol core, the local stdio MCP server, the credential-free reference backend, the conformance kit, an adapter starter, and a worked real-platform adapter/integration proof. It demonstrates protocol behavior through the reference backend, the trace runner, and the local MCP host; live real-platform booking remains optional and requires an operator-owned Openings business. What this cut proves is the authorization model, the fail-closed guardrails, the adapter contract, and one real-platform booking loop.
 
 ## Run the Demo
 
@@ -71,8 +73,6 @@ npm run demo
 ```
 
 It books a synthetic appointment inside a `BookingMandate`, then attempts an over-cap booking under the same mandate and shows the gate rejecting it with `price_exceeds_mandate`.
-
-<!-- LAUNCH_GIF: embed the recorded demo GIF here before publishing (it ends on the over-cap rejection); see the demo runbook. -->
 
 ## Tool Set
 
@@ -96,6 +96,8 @@ Every mutation requires a `BookingMandate` and an `idempotency_key`. If payment,
 - [Spec](docs/spec/v0.1.0/README.md): the protocol model, tools, mandate rules, and audit requirements.
 - [Schema](docs/spec/v0.1.0/schema.md): implementation-bound field definitions for the proof of concept.
 - [Reference backend](packages/reference-backend): the credential-free synthetic platform behind `npm run demo`; the recommended first run.
+- [Local MCP server](packages/osbp-mcp-server): the stdio host that exposes OSBP tools and records local audit events.
+- [Openings adapter and integration kit](integrations/v0.1.0/openings/README.md): the optional live-platform proof, requiring an operator-owned Openings business.
 - [Trace gallery](traces/v0.1.0/): `npm run trace` replays the credential-free reference traces locally with no secrets.
 - [Roadmap](ROADMAP.md): near-term direction while the protocol is pre-1.0.
 

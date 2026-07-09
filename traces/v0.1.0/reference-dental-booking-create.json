@@ -3,7 +3,7 @@
   "name": "reference-dental-booking-create",
   "source": "credential-free synthetic reference backend",
   "clock": "2026-07-01T09:00:00.000Z",
-  "redaction": "No redaction required: all ids, names, domains, and contact values are synthetic.",
+  "redaction": "Approval tokens are redacted by policy; all other ids, names, domains, and contact values are synthetic. The reference backend's by-id status read is synthetic and not a production readback pattern.",
   "scenario": {
     "id": "reference.dental.create",
     "title": "Dental cleaning booked inside a mandate",
@@ -82,6 +82,33 @@
             "schedule_address": "245 E 40th St, New York, NY 10016",
             "schedule_latitude": 40.7481,
             "schedule_longitude": -73.9725,
+            "schedule_hours": [
+              {
+                "day": 1,
+                "open": "08:00",
+                "close": "17:00"
+              },
+              {
+                "day": 2,
+                "open": "08:00",
+                "close": "17:00"
+              },
+              {
+                "day": 3,
+                "open": "08:00",
+                "close": "17:00"
+              },
+              {
+                "day": 4,
+                "open": "08:00",
+                "close": "17:00"
+              },
+              {
+                "day": 5,
+                "open": "08:00",
+                "close": "17:00"
+              }
+            ],
             "schedule_timezone": "America/New_York",
             "provider_id": "dental_dr_lee",
             "provider_name": "Dr. Mina Lee",
@@ -114,11 +141,25 @@
           "verification_method": "none",
           "cancellation_enabled": true,
           "cancellation_window": "PT24H",
+          "cancellation_note": "Cancel at least 24 hours before the appointment.",
+          "late_grace": "PT15M",
           "no_show_fee": {
             "amount_minor": 5000,
             "currency": "USD",
             "type": "fixed",
             "display": "$50.00"
+          },
+          "organization": {
+            "id": "org_01jz7ay6r8dd6yskkpt8rvhk8z",
+            "name": "Carolyn's Dental",
+            "slug": "carolyns-dental",
+            "domain": "carolyns-dental.example",
+            "phone": "+12125550100",
+            "support_email": "care@carolyns-dental.example",
+            "timezone": "America/New_York",
+            "currency": "USD",
+            "country": "US",
+            "total_locations": 1
           }
         }
       }
@@ -166,6 +207,64 @@
           "display_name": "Alex Smith"
         }
       },
+      "result": {
+        "ok": false,
+        "problem": {
+          "code": "requires_user_confirmation",
+          "message": "Final user approval is required before booking. User-facing approval summary: Book Regular cleaning for Alex Smith at $120.00 on 2026-07-07 at 09:00 with Dr. Mina Lee at Midtown Dental Suite. No upfront payment or deposit is required to book. No-show fee: $50.00. Agent retry instruction: If the user approves, retry the same booking request with approval.confirmed=true and approval.token=\"[redacted]\".",
+          "retryable": true
+        }
+      },
+      "platform_write": false,
+      "approval_preflight": true
+    },
+    {
+      "step": 5,
+      "tool": "booking.create",
+      "input": {
+        "mandate": {
+          "id": "mandate_8f44d4ab-8c56-4f6d-9e0f-d5d3e2d36f88",
+          "expires_at": "2026-07-02T09:00:00.000Z",
+          "allowed_actions": [
+            "booking.create"
+          ],
+          "organization_id": "org_01jz7ay6r8dd6yskkpt8rvhk8z",
+          "service_ids": [
+            "dental_cleaning"
+          ],
+          "provider_ids": [
+            "dental_dr_lee"
+          ],
+          "schedule_ids": [
+            "dental_midtown"
+          ],
+          "earliest_start": "2026-07-07T09:00:00",
+          "latest_end": "2026-07-07T09:45:00",
+          "max_price": {
+            "amount_minor": 15000,
+            "currency": "USD"
+          },
+          "allow_policy_fee": false,
+          "max_extra_fee": {
+            "amount_minor": 0,
+            "currency": "USD"
+          }
+        },
+        "idempotency_key": "idempotency-reference-dental-cleaning-create",
+        "service_id": "dental_cleaning",
+        "schedule_id": "dental_midtown",
+        "provider_id": "dental_dr_lee",
+        "date": "2026-07-07",
+        "time": "09:00",
+        "customer": {
+          "id": "cus_01jz7eg2v8y0fq3k9q9m7t8n2a",
+          "display_name": "Alex Smith"
+        },
+        "approval": {
+          "confirmed": true,
+          "token": "[redacted]"
+        }
+      },
       "authorization_gate": {
         "ok": true,
         "checks": [
@@ -189,7 +288,7 @@
       }
     },
     {
-      "step": 5,
+      "step": 6,
       "tool": "booking.status",
       "input": {
         "booking_id": "bk_01jz7f2szt8h7q6m5n4p3r2v9k"
@@ -204,7 +303,8 @@
           "status": "booked",
           "starts_at": "2026-07-07T13:00:00.000Z",
           "starts_at_local": "2026-07-07T09:00:00",
-          "schedule_timezone": "America/New_York"
+          "schedule_timezone": "America/New_York",
+          "customer_id": "cus_01jz7eg2v8y0fq3k9q9m7t8n2a"
         }
       }
     }

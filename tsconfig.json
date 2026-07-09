@@ -5,6 +5,12 @@
       "path": "packages/osbp-core"
     },
     {
+      "path": "packages/openings-adapter"
+    },
+    {
+      "path": "packages/osbp-mcp-server"
+    },
+    {
       "path": "packages/reference-backend"
     },
     {

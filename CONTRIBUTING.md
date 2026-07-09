@@ -12,7 +12,7 @@ This is an npm workspace. Build before testing: the test scripts run against com
 npm install
 npm run build
 npm test
-npm run check      # build plus shared-doc hygiene
+npm run check      # build plus repository checks
 npm run coverage   # build, then run the suite with line/branch/function coverage
 npm run spell      # cspell spell-check (same gate CI enforces)
 ```
@@ -22,13 +22,13 @@ built-in coverage so contributors get one repeatable command and the same
 numbers locally. It measures `dist/` (excluding `*.test.js`), matching what
 `npm test` runs.
 
-Read-only path-resolution smoke (must work from any directory, see the Path Resolution rule in AGENTS.md):
+Read-only path-resolution smoke (must work from any directory because MCP hosts may not preserve `cwd`):
 
 ```bash
 cd / && node <path-to-your-clone>/packages/reference-backend/dist/cli.js --smoke
 ```
 
-Live booking and SMS verification are gated and require local fixtures in a gitignored `.env.local`. Default tests use redacted fixtures and never hit the live merchant.
+Live booking and SMS verification are gated and require local configured values in a gitignored `.env.local`. Default tests use redacted fixtures and never hit the live merchant.
 
 ## Branches
 
@@ -54,7 +54,7 @@ One focused commit per logical change, each revertable and reviewable on its own
 <optional body: explain the why, not the what>
 ```
 
-Do not reference a private tracker, plan item, or bundle name in the message. Keep the doc-sync rule in AGENTS.md in mind: update related active docs in the same commit when behavior or plans change.
+Do not reference a private tracker, plan item, or bundle name in the message. Update related active docs in the same commit when behavior or plans change.
 
 ### AI attribution
 
@@ -78,7 +78,7 @@ Each PR covers a single theme, usually one to four commits. Avoid omnibus PRs. P
 
 - Avoid em-dashes (U+2014) in new shared writing: commit messages, PR titles and descriptions, and new docs. Use commas, colons, periods, or parentheses. Do not rewrite existing text solely to remove them.
 - No emojis in code, comments, commit messages, or PR titles.
-- A shared doc whose audience is not obvious from its path declares its audience in the first three lines (enforced by `scripts/check-shared-docs.mjs`).
+- A shared doc whose audience is not obvious from its path declares its audience in the first three lines before public assembly.
 - Match the surrounding file's brace, indentation, and naming style.
 
 ## Data hygiene
@@ -88,10 +88,10 @@ Nothing committed to the repo, embedded in code or comments, written into a comm
 - absolute filesystem paths under a user-specific home directory; use repo-relative or a placeholder;
 - machine names, hostnames, IP or MAC addresses, or network names;
 - API tokens, keys, secrets, or session cookies, even if they look like test data;
-- live merchant fixtures: real merchant, customer, schedule, or provider IDs, or the test phone number;
+- live merchant values: real merchant, customer, schedule, or provider IDs, or the configured customer phone number;
 - personal data or contact details of any party.
 
-Live fixtures belong only in a gitignored `.env.local`. Traces and examples use redacted or aliased values; see the trace-redaction rules in AGENTS.md.
+Live values belong only in a gitignored `.env.local`. Traces and examples use redacted or aliased values: customer contact/name fields, verification codes, approval tokens, provider image URLs, live platform ids, and durable secrets must not appear in checked-in traces or public examples.
 
 ## Comments
 
@@ -103,7 +103,7 @@ A comment or user-facing string that ships in the public repo describes current 
 - Evolution narrative ("used to do X, now does Y", "since <date>").
 - An upstream API's internals found by reverse engineering: its gating or auth mechanism, internal purpose-string or id formats, access observations, references to a private file or repo, or "the maintainer confirmed" attribution.
 
-That history belongs in `AGENTS.md` and the project's internal notes, not in shipping source. Stay descriptive, not judgmental: say what the code does ("tries several key names"), not what it lacks ("deliberately defensive because the response shape is unconfirmed").
+That history belongs in private project notes, not in shipping source. Stay descriptive, not judgmental: say what the code does ("tries several key names"), not what it lacks ("deliberately defensive because the response shape is unconfirmed").
 
 ## Agent guidance
 
