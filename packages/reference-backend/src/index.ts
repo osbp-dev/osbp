@@ -25,7 +25,7 @@ import type {
 } from "@osbp/core";
 import { OSBP_VERSION, requireApproval, validateMandate } from "@osbp/core";
 import { createHash, randomUUID } from "node:crypto";
-import { mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import { mkdirSync, readFileSync, renameSync, writeFileSync } from "node:fs";
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from "node:http";
 import { type AddressInfo } from "node:net";
 import { dirname, isAbsolute, join } from "node:path";
@@ -281,6 +281,9 @@ export class SyntheticBookingAdapter implements BookingAdapter {
   }
 
   async getBooking(input: BookingStatusInput): Promise<AdapterResult<Booking>> {
+    // The reference backend returns OSBP-created bookings from the local
+    // idempotency record first as a receipt snapshot. Real adapters with a safe
+    // direct read should prefer platform readback when claiming current state.
     const cachedBooking = [...this.idempotencyCache.values()]
       .map((entry) => entry.booking)
       .find((booking) => booking.id === input.booking_id);
@@ -394,42 +397,24 @@ export class SyntheticBookingAdapter implements BookingAdapter {
     }
 
     const startsAtLocal = `${input.date}T${input.time.length === 5 ? `${input.time}:00` : input.time}`;
-    let candidates = availability.value;
-    if (candidates.length === 0 && input.provider_id) {
-      const unscopedAvailability = await this.findAvailability({
-        service_id: input.service_id,
-        schedule_id: input.schedule_id,
-        date: input.date
-      });
-      if (!unscopedAvailability.ok) {
-        return unscopedAvailability;
-      }
-      candidates = unscopedAvailability.value;
-    }
-
-    const slot = candidates.find((candidate) =>
+    const slot = availability.value.find((candidate) =>
       candidate.service_id === input.service_id &&
       candidate.schedule_id === input.schedule_id &&
       candidate.provider_id === input.provider_id &&
       candidate.starts_at_local === startsAtLocal
     );
-    const requestedProviderSlot = candidates.find((candidate) =>
-      candidate.service_id === input.service_id &&
-      candidate.schedule_id === input.schedule_id &&
-      candidate.starts_at_local === startsAtLocal
-    );
-    if (!slot && !requestedProviderSlot) {
+    if (!slot) {
+      const providerScope = providerScopeProblem(input);
+      if (providerScope) {
+        return providerScope;
+      }
       return problem("slot_taken", "Selected slot is no longer available in the reference backend", true);
     }
 
     return ok({
-      ...(slot ?? requestedProviderSlot),
-      provider_id: slot?.provider_id ?? input.provider_id,
-      provider_name: slot?.provider_name,
-      provider_image_url: slot?.provider_image_url,
-      provider_has_portfolio: slot?.provider_has_portfolio,
-      price: (slot ?? requestedProviderSlot)?.price ?? service.price
-    } as Slot);
+      ...slot,
+      price: slot.price ?? service.price
+    });
   }
 
   private async defaultServiceId(): Promise<string> {
@@ -1364,7 +1349,28 @@ function problem<T>(code: string, message: string, retryable: boolean): AdapterR
   };
 }
 
+function providerScopeProblem(input: BookingCreateInput): AdapterResult<Slot> | undefined {
+  const providerScope = input.mandate.provider_ids;
+  if (!providerScope) {
+    return undefined;
+  }
+
+  if (!input.provider_id) {
+    return problem("provider_unknown", "Selected slot does not identify provider required by BookingMandate scope", false);
+  }
+
+  return providerScope.includes(input.provider_id)
+    ? undefined
+    : problem("provider_not_allowed", "Selected provider is outside BookingMandate scope", false);
+}
+
 function problemFromError<T>(code: string, error: unknown): AdapterResult<T> {
+  if (error instanceof SyntheticHttpError) {
+    const upstreamProblem = parseSyntheticProblem(error.body);
+    if (upstreamProblem?.code === "verification_failed") {
+      return problem("verification_failed", upstreamProblem.message ?? "Verification code did not match", false);
+    }
+  }
   if (error instanceof SyntheticHttpError && error.status === 429) {
     return problem("rate_limited", error.message, true);
   }
@@ -1376,6 +1382,21 @@ function problemFromError<T>(code: string, error: unknown): AdapterResult<T> {
       retryable: error instanceof SyntheticHttpError ? error.status >= 500 : false
     }
   };
+}
+
+function parseSyntheticProblem(body: string): { code?: string; message?: string } | undefined {
+  try {
+    const parsed = JSON.parse(body) as unknown;
+    if (!isRecord(parsed) || !isRecord(parsed.problem)) {
+      return undefined;
+    }
+    return {
+      code: typeof parsed.problem.code === "string" ? parsed.problem.code : undefined,
+      message: typeof parsed.problem.message === "string" ? parsed.problem.message : undefined
+    };
+  } catch {
+    return undefined;
+  }
 }
 
 function idempotencyConflict(): AdapterResult<Receipt> {
@@ -1397,9 +1418,25 @@ function loadIdempotencyStore(path: string | undefined): Map<string, Idempotency
   }
 
   try {
-    const parsed = JSON.parse(readFileSync(resolved, "utf8")) as Record<string, IdempotencyEntry>;
-    return new Map(Object.entries(parsed));
-  } catch {
+    const parsed = JSON.parse(readFileSync(resolved, "utf8")) as unknown;
+    if (!isRecord(parsed)) {
+      console.warn(`Ignoring malformed OSBP reference idempotency store at ${resolved}: expected object`);
+      return new Map();
+    }
+    const entries: Array<[string, IdempotencyEntry]> = [];
+    for (const [key, entry] of Object.entries(parsed)) {
+      if (isIdempotencyEntry(entry)) {
+        entries.push([key, entry]);
+      }
+    }
+    if (entries.length !== Object.keys(parsed).length) {
+      console.warn(`Ignoring malformed entries in OSBP reference idempotency store at ${resolved}`);
+    }
+    return new Map(entries);
+  } catch (error) {
+    if (!isNodeError(error) || error.code !== "ENOENT") {
+      console.warn(`Ignoring unreadable OSBP reference idempotency store at ${resolved}: ${error instanceof Error ? error.message : String(error)}`);
+    }
     return new Map();
   }
 }
@@ -1410,7 +1447,25 @@ function saveIdempotencyStore(path: string | undefined, entries: Map<string, Ide
     return;
   }
   mkdirSync(dirname(resolved), { recursive: true });
-  writeFileSync(resolved, `${JSON.stringify(Object.fromEntries(entries), null, 2)}\n`);
+  const tempPath = `${resolved}.${process.pid}.${Date.now()}.tmp`;
+  writeFileSync(tempPath, `${JSON.stringify(Object.fromEntries(entries), null, 2)}\n`);
+  renameSync(tempPath, resolved);
+}
+
+function isIdempotencyEntry(value: unknown): value is IdempotencyEntry {
+  if (!isRecord(value) || typeof value.payloadHash !== "string" || !isRecord(value.result) || !isRecord(value.booking)) {
+    return false;
+  }
+
+  if (value.result.ok === true) {
+    return isRecord(value.result.value) && typeof value.result.value.id === "string";
+  }
+
+  return value.result.ok === false && isRecord(value.result.problem) && typeof value.result.problem.code === "string";
+}
+
+function isNodeError(error: unknown): error is NodeJS.ErrnoException {
+  return error instanceof Error && "code" in error;
 }
 
 function resolveIdempotencyStorePath(path: string | undefined): string | undefined {
@@ -1429,19 +1484,54 @@ function redactVerificationCode(input: BookingCreateInput): unknown {
 
 function bookingApprovalSummary(input: BookingCreateInput, service: Service, slot: Slot, policy: Policy): string {
   const price = slot.price ?? service.price;
-  const priceText =
-    price?.display ??
-    (price?.amount_minor !== undefined && price.currency
-      ? formatMoney(price.amount_minor, price.currency)
-      : "an unlisted price");
-  const payment =
-    policy.payment_requirement && policy.payment_requirement !== "none"
-      ? `Payment required: ${policy.payment_requirement}.`
-      : "No upfront payment or deposit is required to book.";
+  const priceText = moneyDisplay(price) ?? "an unlisted price";
+  const customerName = customerNameForApproval(input.customer);
+  const payment = paymentRequirementSummary(policy);
+  const cancellationFee = moneyDisplay(policy.cancellation_fee);
+  const noShowFee = moneyDisplay(policy.no_show_fee);
+  const policyParts = [
+    payment,
+    cancellationFee ? `Cancellation fee: ${cancellationFee}.` : undefined,
+    noShowFee ? `No-show fee: ${noShowFee}.` : undefined
+  ].filter((part): part is string => Boolean(part));
+  const provider = slot.provider_name ?? "the selected provider";
+  const schedule = slot.schedule_name ?? "the selected location";
   return (
-    `Book ${service.name} for ${priceText} on ${input.date} at ${input.time} ` +
-    `with provider ${input.provider_id} at schedule ${input.schedule_id}. ${payment}`
+    `Book ${service.name}${customerName ? ` for ${customerName}` : ""} at ${priceText} on ${input.date} at ${input.time} ` +
+    `with ${provider} at ${schedule}. ${policyParts.join(" ")}`
   );
+}
+
+function paymentRequirementSummary(policy: Policy): string {
+  const deposit = moneyDisplay(policy.deposit);
+  switch (policy.payment_requirement) {
+    case "deposit":
+      return deposit ? `A deposit of ${deposit} is required to book.` : "A deposit is required to book.";
+    case "full_prepay":
+      return "Full prepayment is required to book.";
+    case "unknown":
+      return "The payment requirement is unknown.";
+    case "none":
+    case undefined:
+      return "No upfront payment or deposit is required to book.";
+  }
+}
+
+function moneyDisplay(money: Money | undefined): string | undefined {
+  return money?.display ??
+    (money?.amount_minor !== undefined && money.currency ? formatMoney(money.amount_minor, money.currency) : undefined);
+}
+
+function customerNameForApproval(customer: Customer | undefined): string | undefined {
+  const givenName = customer?.given_name?.trim();
+  const familyName = customer?.family_name?.trim();
+  const structured = [givenName, familyName].filter((part): part is string => Boolean(part)).join(" ");
+  if (structured) {
+    return structured;
+  }
+
+  const displayName = customer?.display_name?.trim();
+  return displayName && displayName.length > 0 ? displayName : undefined;
 }
 
 function stableHash(value: unknown): string {
@@ -1521,16 +1611,45 @@ function nonFixedMoney(currency: string, type: "insurance_dependent" | "quote_re
 }
 
 function formatMoney(amountMinor: number, currency: string): string {
-  const major = amountMinor / 10 ** minorUnitExponent(currency);
-  return new Intl.NumberFormat("en-US", { style: "currency", currency }).format(major);
+  const exponent = minorUnitExponent(currency);
+  const major = amountMinor / 10 ** exponent;
+  return new Intl.NumberFormat("en-US", {
+    style: "currency",
+    currency,
+    minimumFractionDigits: exponent,
+    maximumFractionDigits: exponent
+  }).format(major);
 }
 
 const CURRENCY_MINOR_UNIT_EXPONENT: Record<string, number> = {
+  // Snapshot reviewed against ISO 4217 / CLDR on 2026-07-07; recheck before
+  // changing this table or onboarding a new merchant currency.
+  BIF: 0,
+  CLP: 0,
+  DJF: 0,
+  GNF: 0,
+  ISK: 0,
   JPY: 0,
+  KMF: 0,
   KRW: 0,
-  KWD: 3,
+  PYG: 0,
+  RWF: 0,
+  UGX: 0,
+  UYI: 0,
+  VND: 0,
+  VUV: 0,
+  XAF: 0,
+  XOF: 0,
+  XPF: 0,
   BHD: 3,
-  OMR: 3
+  IQD: 3,
+  JOD: 3,
+  KWD: 3,
+  LYD: 3,
+  OMR: 3,
+  TND: 3,
+  CLF: 4,
+  UYW: 4
 };
 
 function minorUnitExponent(currency: string): number {
@@ -1583,6 +1702,8 @@ export const REFERENCE_CONFORMANCE_FIXTURES = {
     fixed_gbp: "conformance_fixed_gbp",
     fixed_jpy: "conformance_fixed_jpy",
     fixed_kwd: "conformance_fixed_kwd",
+    fixed_clp: "conformance_fixed_clp",
+    fixed_jod: "conformance_fixed_jod",
     insurance_dependent: "conformance_insurance_dependent",
     quote_required: "conformance_quote_required",
     consultation: "conformance_consultation",
@@ -1596,7 +1717,9 @@ export const REFERENCE_CONFORMANCE_FIXTURES = {
     conformance_fixed_eur: { amount_minor: 9000, currency: "EUR" },
     conformance_fixed_gbp: { amount_minor: 8000, currency: "GBP" },
     conformance_fixed_jpy: { amount_minor: 12000, currency: "JPY" },
-    conformance_fixed_kwd: { amount_minor: 12500, currency: "KWD" }
+    conformance_fixed_kwd: { amount_minor: 12500, currency: "KWD" },
+    conformance_fixed_clp: { amount_minor: 45000, currency: "CLP" },
+    conformance_fixed_jod: { amount_minor: 45000, currency: "JOD" }
   }
 };
 
@@ -1678,6 +1801,24 @@ export const REFERENCE_CONFORMANCE_ORGANIZATION: ReferenceOrganizationSeed = {
       duration: "PT45M",
       price: money(12500, "KWD"),
       branch: "conformance: fixed KWD",
+      schedule_ids: [REFERENCE_CONFORMANCE_FIXTURES.schedule_id],
+      policy: basePolicy({})
+    },
+    {
+      id: REFERENCE_CONFORMANCE_FIXTURES.services.fixed_clp,
+      name: "Fixed CLP service",
+      duration: "PT45M",
+      price: money(45000, "CLP"),
+      branch: "conformance: fixed CLP",
+      schedule_ids: [REFERENCE_CONFORMANCE_FIXTURES.schedule_id],
+      policy: basePolicy({})
+    },
+    {
+      id: REFERENCE_CONFORMANCE_FIXTURES.services.fixed_jod,
+      name: "Fixed JOD service",
+      duration: "PT45M",
+      price: money(45000, "JOD"),
+      branch: "conformance: fixed JOD",
       schedule_ids: [REFERENCE_CONFORMANCE_FIXTURES.schedule_id],
       policy: basePolicy({})
     },

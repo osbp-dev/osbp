@@ -9,6 +9,9 @@
   "references": [
     {
       "path": "../osbp-core"
+    },
+    {
+      "path": "../reference-backend"
     }
   ],
   "include": [

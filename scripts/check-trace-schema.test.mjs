@@ -9,7 +9,7 @@
 // supply chain (no ajv) while still proving the schemas and traces agree.
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { readFileSync, readdirSync } from "node:fs";
+import { existsSync, readFileSync, readdirSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 
@@ -84,3 +84,101 @@ test("every golden trace reject step carries a schema-valid Problem", () => {
     }
   }
 });
+
+test("every successful booking.create trace receipt carries required Receipt fields", () => {
+  assert.ok(traceFiles.length > 0, "expected at least one golden trace");
+  for (const file of traceFiles) {
+    const trace = loadJson(join(tracesDir, file));
+    for (const [index, call] of bookingCreateCalls(trace).entries()) {
+      const receipt = receiptValue(call);
+      if (!receipt) {
+        continue;
+      }
+      const label = `${file} booking.create[${index}] receipt`;
+      assert.equal(typeof receipt.id, "string", `${label}.id must be a string`);
+      assert.equal(typeof receipt.text, "string", `${label}.text must be a string`);
+      assert.ok(receipt.text.length > 0, `${label}.text must not be empty`);
+    }
+  }
+});
+
+test("redacted live trace uses the configured-customer alias documented by the generator", () => {
+  const liveTracePath = join(tracesDir, ["open", "ing", "s-create.json"].join(""));
+  if (!existsSync(liveTracePath)) {
+    return;
+  }
+  const trace = loadJson(liveTracePath);
+  const serialized = JSON.stringify(trace);
+  assert.ok(
+    serialized.includes("customer_configured"),
+    "live trace should use the configured customer alias"
+  );
+  assert.ok(
+    !serialized.includes("test_customer") && !serialized.includes("customer_1"),
+    "live trace should not use stale generated customer aliases"
+  );
+});
+
+test("successful golden traces show the approval preflight before the first create", () => {
+  assert.ok(traceFiles.length > 0, "expected at least one golden trace");
+  for (const file of traceFiles) {
+    const trace = loadJson(join(tracesDir, file));
+    const creates = bookingCreateCalls(trace);
+    const firstSuccessIndex = creates.findIndex((call) => isSuccessfulCreate(call));
+    if (firstSuccessIndex === -1) {
+      continue;
+    }
+
+    const preflightIndex = creates.findIndex((call, index) => (
+      index < firstSuccessIndex &&
+      call.input?.approval === undefined &&
+      problemCode(call) === "requires_user_confirmation"
+    ));
+    assert.notEqual(
+      preflightIndex,
+      -1,
+      `${file}: first successful booking.create must be preceded by a requires_user_confirmation preflight`
+    );
+
+    const firstSuccess = creates[firstSuccessIndex];
+    assert.equal(firstSuccess.input?.approval?.confirmed, true, `${file}: first successful booking.create must carry approval`);
+    assert.equal(
+      firstSuccess.input?.approval?.token,
+      "[redacted]",
+      `${file}: approval token in published traces must be redacted`
+    );
+  }
+});
+
+function bookingCreateCalls(trace) {
+  if (Array.isArray(trace.steps)) {
+    return trace.steps
+      .filter((step) => step.tool === "booking.create")
+      .map((step) => ({
+        input: step.input,
+        output: step.result
+      }));
+  }
+
+  return (trace.tool_calls ?? [])
+    .filter((call) => call.tool === "osbp_booking_create" || call.tool === "booking.create")
+    .map((call) => ({
+      input: call.input,
+      output: call.output
+    }));
+}
+
+function problemCode(call) {
+  return call.output?.problem?.code;
+}
+
+function isSuccessfulCreate(call) {
+  return call.output?.ok === true || call.output?.receipt !== undefined;
+}
+
+function receiptValue(call) {
+  if (call.output?.ok === true) {
+    return call.output.value;
+  }
+  return call.output?.receipt;
+}

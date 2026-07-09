@@ -10,6 +10,20 @@
           "const": true
         },
         "value": true,
+        "osbp_runtime": {
+          "type": "object",
+          "properties": {
+            "idempotency": {
+              "enum": [
+                "local_cache_replay"
+              ]
+            },
+            "message": {
+              "type": "string"
+            }
+          },
+          "additionalProperties": false
+        },
         "audit_event_id": {
           "type": "string"
         }
@@ -28,6 +42,20 @@
         },
         "problem": {
           "$ref": "problem.schema.json"
+        },
+        "osbp_runtime": {
+          "type": "object",
+          "properties": {
+            "idempotency": {
+              "enum": [
+                "local_cache_replay"
+              ]
+            },
+            "message": {
+              "type": "string"
+            }
+          },
+          "additionalProperties": false
         },
         "audit_event_id": {
           "type": "string"

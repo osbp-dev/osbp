@@ -1,0 +1,26 @@
+{
+  "title": "Open Service Booking Protocol (OSBP)",
+  "description": "An open protocol for AI agents to book service appointments under a user-approved, scoped mandate, over the Model Context Protocol (MCP). First public release: v0.1.0 (Foundation).",
+  "upload_type": "software",
+  "version": "0.1.0",
+  "license": "cc-by-4.0",
+  "creators": [
+    {
+      "name": "Volk, Andy",
+      "orcid": "0009-0004-5889-9685",
+      "affiliation": "Andy[x]"
+    }
+  ],
+  "keywords": [
+    "AI agents",
+    "service booking",
+    "Model Context Protocol",
+    "MCP",
+    "open protocol",
+    "booking mandate"
+  ],
+  "related_identifiers": [
+    { "identifier": "https://osbp.dev", "relation": "isDescribedBy", "scheme": "url" },
+    { "identifier": "https://github.com/osbp-dev/osbp", "relation": "isSupplementTo", "scheme": "url" }
+  ]
+}

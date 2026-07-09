@@ -4,7 +4,7 @@
 // The README is generated output: edit the parts, not the README.
 //   build:  node scripts/build-spec.mjs
 //   check:  node scripts/build-spec.mjs --check   (fails if README is stale)
-import { readdirSync, readFileSync, writeFileSync } from "node:fs";
+import { readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 
@@ -14,17 +14,12 @@ const readmePath = join(specDir, "README.md");
 
 const read = (name) => readFileSync(join(specDir, "_parts", name), "utf8").trim();
 
-// The README is assembled from _parts in order: preamble, spec-body, then any
-// additional _parts/*.md (sorted). An extra part carries adapter-specific notes
-// that ship only in a cut which includes the matching adapter; a cut that omits
-// an extra part omits its README section too, so `build-spec --check` stays
-// green in both the full and the minimal public builds.
+// The README is assembled from the platform-agnostic parts only. Adapter-specific
+// notes live under integrations/<version>/<platform>/ so the generated spec and
+// adapter-context bundle cannot grow platform vocabulary by accident.
 const LEADING_PARTS = ["preamble.md", "spec-body.md"];
-const extraParts = readdirSync(join(specDir, "_parts"))
-  .filter((name) => name.endsWith(".md") && !LEADING_PARTS.includes(name))
-  .sort();
 
-const assembled = [...LEADING_PARTS, ...extraParts].map(read).join("\n\n") + "\n";
+const assembled = LEADING_PARTS.map(read).join("\n\n") + "\n";
 
 if (process.argv.includes("--check")) {
   const current = readFileSync(readmePath, "utf8");

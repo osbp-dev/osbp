@@ -63,6 +63,12 @@
             "email": {
               "type": "string"
             },
+            "given_name": {
+              "type": "string"
+            },
+            "family_name": {
+              "type": "string"
+            },
             "display_name": {
               "type": "string"
             }
@@ -88,6 +94,12 @@
               "type": "string"
             },
             "email": {
+              "type": "string"
+            },
+            "given_name": {
+              "type": "string"
+            },
+            "family_name": {
               "type": "string"
             },
             "display_name": {
@@ -265,6 +277,12 @@
             "email": {
               "type": "string"
             },
+            "given_name": {
+              "type": "string"
+            },
+            "family_name": {
+              "type": "string"
+            },
             "display_name": {
               "type": "string"
             }
@@ -320,6 +338,12 @@
               "type": "string"
             },
             "email": {
+              "type": "string"
+            },
+            "given_name": {
+              "type": "string"
+            },
+            "family_name": {
               "type": "string"
             },
             "display_name": {

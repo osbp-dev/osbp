@@ -217,6 +217,12 @@ async function renderLaunchTapeDemo(now: Date, colors: DemoColors, gum: boolean)
       renderTapeCard(colors.bold("BOOK"), [
         "osbp booking.create",
         "",
+        colors.cyan("FINAL APPROVAL GATE"),
+        "requires_user_confirmation",
+        "no booking created",
+        "User approves shown summary (simulated)",
+        "retry with approval token",
+        "",
         colors.cyan("RECEIPT"),
         `Booked ${attempt.service.name}`,
         `Provider: ${attempt.slot.provider_name ?? "selected provider"}`,
@@ -383,8 +389,8 @@ function renderGumLaunchTape(attempt: DemoAttempt, receipt: Receipt, coda: DemoA
       {
         role: "COMMENT",
         lines: [
-          "Backend server writes only after OSBP core passes.",
-          "Adapter maps the OSBP JSON mutation to a platform POST."
+          "The first booking.create is a no-write final-approval preflight.",
+          "It returns requires_user_confirmation and an approval token."
         ]
       },
       {
@@ -395,6 +401,22 @@ function renderGumLaunchTape(attempt: DemoAttempt, receipt: Receipt, coda: DemoA
         ]
       },
       pauseBlock("1s"),
+      {
+        role: "STATE",
+        lines: [
+          "FINAL APPROVAL GATE",
+          "requires_user_confirmation",
+          "No booking created.",
+          "User approves shown summary (simulated)."
+        ]
+      },
+      pauseBlock("1s"),
+      {
+        role: "COMMENT",
+        lines: [
+          "Adapter maps the approved OSBP JSON mutation to a platform POST."
+        ]
+      },
       {
         role: "COMMENT",
         lines: ["Adapter -> Booking Platform: POST /v1/organizations/org_01jz7ay6r8dd6yskkpt8rvhk8z/bookings"]
@@ -658,6 +680,8 @@ function renderAttempt(
   if (attempt.validation.ok) {
     lines.push(`Server authorization gate: ${colors.green("PASS")}`);
     lines.push(`  ${colors.dim("validateMandate()")}: scope, time, price, and policy fit the mandate`);
+    lines.push("Final approval gate: requires_user_confirmation (no booking created)");
+    lines.push("  User approves shown summary (simulated) -> retry with approval token");
     lines.push("Book: booking.create");
     if (!receipt?.ok) {
       throw new Error(`Demo booking failed with ${receipt?.problem.code ?? "missing receipt"}`);
@@ -782,8 +806,14 @@ function formatMoney(money: Money): string {
   if (money.amount_minor === undefined) {
     return money.currency;
   }
-  const amount = money.amount_minor / 10 ** minorUnitExponent(money.currency);
-  return new Intl.NumberFormat("en-US", { style: "currency", currency: money.currency }).format(amount);
+  const exponent = minorUnitExponent(money.currency);
+  const amount = money.amount_minor / 10 ** exponent;
+  return new Intl.NumberFormat("en-US", {
+    style: "currency",
+    currency: money.currency,
+    minimumFractionDigits: exponent,
+    maximumFractionDigits: exponent
+  }).format(amount);
 }
 
 function policyLine(policy: Policy): string {
@@ -818,12 +848,39 @@ function problemSummary(problem: Problem, price: Money | undefined, cap: Money |
 }
 
 function minorUnitExponent(currency: string): number {
-  return currency.toUpperCase() === "JPY"
-    ? 0
-    : ["KWD", "BHD", "OMR"].includes(currency.toUpperCase())
-      ? 3
-      : 2;
+  return CURRENCY_MINOR_UNIT_EXPONENT[currency.toUpperCase()] ?? 2;
 }
+
+const CURRENCY_MINOR_UNIT_EXPONENT: Record<string, number> = {
+  // Snapshot reviewed against ISO 4217 / CLDR on 2026-07-07; recheck before
+  // changing this table or onboarding a new merchant currency.
+  BIF: 0,
+  CLP: 0,
+  DJF: 0,
+  GNF: 0,
+  ISK: 0,
+  JPY: 0,
+  KMF: 0,
+  KRW: 0,
+  PYG: 0,
+  RWF: 0,
+  UGX: 0,
+  UYI: 0,
+  VND: 0,
+  VUV: 0,
+  XAF: 0,
+  XOF: 0,
+  XPF: 0,
+  BHD: 3,
+  IQD: 3,
+  JOD: 3,
+  KWD: 3,
+  LYD: 3,
+  OMR: 3,
+  TND: 3,
+  CLF: 4,
+  UYW: 4
+};
 
 function demoColors(enabled: boolean): DemoColors {
   return {

@@ -174,6 +174,21 @@ describe("validateMandate", () => {
     assert.equal(result.ok ? undefined : result.problem.code, "requires_user_confirmation");
   });
 
+  it("requires confirmation for a non-fixed selected price even without a mandate cap", () => {
+    const result = validateMandate({
+      mandate: { ...mandate, max_price: undefined },
+      action: "booking.create",
+      organization_id: "org_01jw3z8x9k2m4n6p8r0s1t3v5w",
+      service: { ...service, price: { currency: "USD", type: "insurance_dependent" } },
+      slot,
+      policy: { payment_requirement: "none" },
+      now
+    });
+
+    assert.equal(result.ok, false);
+    assert.equal(result.ok ? undefined : result.problem.code, "requires_user_confirmation");
+  });
+
   it("rejects a required fee in a different currency than max_extra_fee as currency_mismatch", () => {
     const result = validateMandate({
       mandate: {
@@ -367,8 +382,8 @@ describe("validateMandate", () => {
   });
 
   // validateSlotScope must reject any tz-aware input on the four
-  // wall-clock fields so compareDateLike never silently shifts by the host's
-  // tz. Mirror of the instant-side strictness on expires_at, inverse
+  // wall-clock fields so the validator never mixes instants with merchant-local
+  // wall clocks. Mirror of the instant-side strictness on expires_at, inverse
   // assertion. Each case mutates exactly one of the four fields to a
   // tz-aware value and confirms the rejection fires before any
   // schedule/provider/time scope check.
@@ -524,6 +539,19 @@ describe("validateMandate fail-closed hardening", () => {
     assert.equal(result.ok ? undefined : result.problem.code, "invalid_mandate");
   });
 
+  it("rejects latest_end-scoped booking.create when the slot has no end wall-clock", () => {
+    const { ends_at_local: _endsAtLocal, ...slotWithoutEnd } = slot;
+    const result = validateMandate({ ...accept, slot: slotWithoutEnd });
+    assert.equal(result.ok, false);
+    assert.equal(result.ok ? undefined : result.problem.code, "invalid_mandate");
+  });
+
+  it("treats an omitted payment_requirement as unknown before booking.create", () => {
+    const result = validateMandate({ ...accept, policy: { service_id: "service_1" } });
+    assert.equal(result.ok, false);
+    assert.equal(result.ok ? undefined : result.problem.code, "requires_user_confirmation");
+  });
+
   it("rejects evidence describing different services", () => {
     const result = validateMandate({ ...accept, slot: { ...slot, service_id: "service_2" } });
     assert.equal(result.ok, false);
@@ -614,6 +642,96 @@ describe("validateMandate reject paths (previously unexercised)", () => {
     });
     assert.equal(result.ok, false);
     assert.equal(result.ok ? undefined : result.problem.code, "slot_too_early");
+  });
+
+  it("compares wall-clock bounds lexicographically even when host Date.parse normalizes a DST gap", () => {
+    const originalParse = Date.parse;
+    Date.parse = (value: string): number => {
+      switch (value) {
+        case "2030-03-10T02:30:00":
+          return Date.UTC(2030, 2, 10, 3, 30, 0);
+        case "2030-03-10T03:00:00":
+          return Date.UTC(2030, 2, 10, 3, 0, 0);
+        case "2030-03-10T03:30:00":
+          return Date.UTC(2030, 2, 10, 3, 30, 0);
+        case "2030-03-10T04:00:00":
+          return Date.UTC(2030, 2, 10, 4, 0, 0);
+        default:
+          return originalParse(value);
+      }
+    };
+
+    try {
+      const result = validateMandate({
+        mandate: {
+          ...mandate,
+          expires_at: "2030-03-09T00:00:00Z",
+          earliest_start: "2030-03-10T03:00:00",
+          latest_end: "2030-03-10T04:00:00"
+        },
+        action: "booking.create",
+        organization_id: org,
+        service,
+        slot: {
+          ...slot,
+          starts_at_local: "2030-03-10T02:30:00",
+          ends_at_local: "2030-03-10T03:30:00"
+        },
+        policy,
+        now
+      });
+
+      assert.equal(result.ok, false);
+      assert.equal(result.ok ? undefined : result.problem.code, "slot_too_early");
+    } finally {
+      Date.parse = originalParse;
+    }
+  });
+
+  it("treats equivalent fractional-second wall-clock bounds as equal", () => {
+    const result = validateMandate({
+      mandate: {
+        ...mandate,
+        expires_at: "2030-05-01T13:00:00Z",
+        earliest_start: "2030-05-02T09:00:00.5",
+        latest_end: "2030-05-02T10:00:00.5"
+      },
+      action: "booking.create",
+      organization_id: org,
+      service,
+      slot: {
+        ...slot,
+        starts_at_local: "2030-05-02T09:00:00.50",
+        ends_at_local: "2030-05-02T10:00:00.50"
+      },
+      policy,
+      now
+    });
+
+    assert.deepEqual(result, { ok: true });
+  });
+
+  it("treats all-zero fractional wall-clock seconds as whole seconds", () => {
+    const result = validateMandate({
+      mandate: {
+        ...mandate,
+        expires_at: "2030-05-01T13:00:00Z",
+        earliest_start: "2030-05-02T09:00:00",
+        latest_end: "2030-05-02T10:00:00"
+      },
+      action: "booking.create",
+      organization_id: org,
+      service,
+      slot: {
+        ...slot,
+        starts_at_local: "2030-05-02T09:00:00.000",
+        ends_at_local: "2030-05-02T10:00:00.000"
+      },
+      policy,
+      now
+    });
+
+    assert.deepEqual(result, { ok: true });
   });
 
   it("rejects a slot ending after latest_end", () => {

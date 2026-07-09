@@ -3,7 +3,7 @@
   "name": "reference-dental-idempotent-retry",
   "source": "credential-free synthetic reference backend",
   "clock": "2026-07-01T09:00:00.000Z",
-  "redaction": "No redaction required: all ids, names, domains, and contact values are synthetic.",
+  "redaction": "Approval tokens are redacted by policy; all other ids, names, domains, and contact values are synthetic. The reference backend's by-id status read is synthetic and not a production readback pattern.",
   "scenario": {
     "id": "reference.dental.idempotent_retry",
     "title": "Dental booking retry returns the same receipt",
@@ -75,15 +75,74 @@
         }
       },
       "result": {
+        "ok": false,
+        "problem": {
+          "code": "requires_user_confirmation",
+          "message": "Final user approval is required before booking. User-facing approval summary: Book Regular cleaning for Alex Smith at $120.00 on 2026-07-07 at 09:00 with Dr. Mina Lee at Midtown Dental Suite. No upfront payment or deposit is required to book. No-show fee: $50.00. Agent retry instruction: If the user approves, retry the same booking request with approval.confirmed=true and approval.token=\"[redacted]\".",
+          "retryable": true
+        }
+      },
+      "platform_write": false,
+      "approval_preflight": true
+    },
+    {
+      "step": 2,
+      "tool": "booking.create",
+      "input": {
+        "mandate": {
+          "id": "mandate_8f44d4ab-8c56-4f6d-9e0f-d5d3e2d36f88",
+          "expires_at": "2026-07-02T09:00:00.000Z",
+          "allowed_actions": [
+            "booking.create"
+          ],
+          "organization_id": "org_01jz7ay6r8dd6yskkpt8rvhk8z",
+          "service_ids": [
+            "dental_cleaning"
+          ],
+          "provider_ids": [
+            "dental_dr_lee"
+          ],
+          "schedule_ids": [
+            "dental_midtown"
+          ],
+          "earliest_start": "2026-07-07T09:00:00",
+          "latest_end": "2026-07-07T09:45:00",
+          "max_price": {
+            "amount_minor": 15000,
+            "currency": "USD"
+          },
+          "allow_policy_fee": false,
+          "max_extra_fee": {
+            "amount_minor": 0,
+            "currency": "USD"
+          }
+        },
+        "idempotency_key": "idempotency-reference-dental-cleaning-create",
+        "service_id": "dental_cleaning",
+        "schedule_id": "dental_midtown",
+        "provider_id": "dental_dr_lee",
+        "date": "2026-07-07",
+        "time": "09:00",
+        "customer": {
+          "id": "cus_01jz7eg2v8y0fq3k9q9m7t8n2a",
+          "display_name": "Alex Smith"
+        },
+        "approval": {
+          "confirmed": true,
+          "token": "[redacted]"
+        }
+      },
+      "result": {
         "ok": true,
         "value": {
           "id": "rcpt_01jz7f2szt8h7q6m5n4p3r2v9k",
-          "booking_id": "bk_01jz7f2szt8h7q6m5n4p3r2v9k"
+          "booking_id": "bk_01jz7f2szt8h7q6m5n4p3r2v9k",
+          "text": "Booked Regular cleaning on 2026-07-07 at 09:00. Reference booking id: bk_01jz7f2szt8h7q6m5n4p3r2v9k."
         }
       }
     },
     {
-      "step": 2,
+      "step": 3,
       "tool": "booking.create",
       "input": {
         "mandate": {
@@ -129,12 +188,13 @@
         "ok": true,
         "value": {
           "id": "rcpt_01jz7f2szt8h7q6m5n4p3r2v9k",
-          "booking_id": "bk_01jz7f2szt8h7q6m5n4p3r2v9k"
+          "booking_id": "bk_01jz7f2szt8h7q6m5n4p3r2v9k",
+          "text": "Booked Regular cleaning on 2026-07-07 at 09:00. Reference booking id: bk_01jz7f2szt8h7q6m5n4p3r2v9k."
         }
       }
     },
     {
-      "step": 3,
+      "step": 4,
       "tool": "booking.create",
       "input": {
         "mandate": {

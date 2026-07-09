@@ -1,0 +1,29 @@
+{
+  "name": "@osbp/mcp-server",
+  "version": "0.1.0",
+  "type": "module",
+  "private": true,
+  "bin": {
+    "osbp-mcp-server": "./dist/server.js"
+  },
+  "exports": {
+    ".": {
+      "types": "./dist/server.d.ts",
+      "default": "./dist/server.js"
+    }
+  },
+  "dependencies": {
+    "@modelcontextprotocol/sdk": "^1.29.0",
+    "@osbp/core": "0.1.0",
+    "@osbp/openings-adapter": "0.1.0",
+    "zod": "^3.25.0"
+  },
+  "scripts": {
+    "build": "tsc -b",
+    "check": "tsc -b --pretty false",
+    "clean": "tsc -b --clean",
+    "smoke:read": "node ./dist/server.js --smoke-read",
+    "start": "node ./dist/server.js",
+    "test": "node --test dist/*.test.js"
+  }
+}
