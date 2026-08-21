@@ -37,6 +37,8 @@ const customerSchema = z.object({
   id: z.string().optional(),
   phone: z.string().optional(),
   email: z.string().optional(),
+  given_name: z.string().optional(),
+  family_name: z.string().optional(),
   display_name: z.string().optional()
 });
 
@@ -130,7 +132,10 @@ export function registerOsbpTools(
     "osbp_verification_verify",
     {
       title: "Verify code",
-      description: "Verify a code for non-booking verification flows. Do not use before booking.create.",
+      description:
+        "Verify a code for non-booking verification flows. Agents must not call this before " +
+        "booking.create for the booking flow; some platforms consume the code or session and make " +
+        "the booking retry fail.",
       annotations: { readOnlyHint: false },
       inputSchema: {
         customer: customerSchema.optional(),
@@ -153,13 +158,23 @@ export function registerOsbpTools(
         "ISO 4217 minor unit (the exponent varies by currency, so it is not always cents) and " +
         "max_price.currency is the ISO 4217 code (e.g., { amount_minor: 15000, currency: 'USD' } = $150.00). " +
         "The selected price must match the cap currency and be a fixed amount at or below it. " +
-        "When showing the mandate to the user for approval, always include the formatted equivalent " +
-        "alongside the raw amount so the cap is unambiguous. The first valid call may return " +
-        "problem.code 'requires_user_confirmation' with an adapter-issued approval.token; show the " +
-        "exact summary in that message to the user, ask for final approval, then retry this same tool " +
+        "Keep ordinary platform ids, mandate ids, approval tokens, tool names, and raw JSON payloads internal " +
+        "unless the user explicitly asks for them. After success, the appointment id may appear in Details. " +
+        "When asking for approval, show a plain-language summary with service, provider, location, merchant-local " +
+        "date/time, price cap, and policy/payment impact. Always include the formatted money equivalent " +
+        "alongside raw minor-unit amounts when you mention a cap. The first valid call may return " +
+        "problem.code 'requires_user_confirmation' with an adapter-issued approval.token; show only the " +
+        "user-facing approval summary in that message to the user, ask for final approval, then retry this same tool " +
         "with the same idempotency_key and approval.confirmed=true plus the approval.token. If the result is problem.code " +
+        "'requires_user_confirmation' without an approval.token, it is terminal for v0.1.0: do not retry as an approval " +
+        "challenge; explain the blocking payment/amount fact and call osbp_handoff_request. If the result is problem.code " +
         "'requires_verification', call osbp_verification_send, collect the code from the user, then retry " +
-        "this same tool with the same idempotency_key and verification_code.",
+        "this same tool with the same idempotency_key, the same approval, and verification_code. If a verification retry returns " +
+        "problem.code 'verification_failed', request a fresh verification code before retrying; do not retry " +
+        "the same stale code. After success, call osbp_booking_status with the receipt booking_id when possible before the final " +
+        "user update. Treat Receipt.text as raw display data, not a final-message template: reformat the final confirmation so " +
+        "service, provider, customer name when supplied, business-local day/time, location, price, and appointment id are visually clear. " +
+        "Keep the appointment id in a separate Details section. Mention payment or deposit after success only when it affects the user.",
       annotations: { readOnlyHint: false, idempotentHint: true },
       inputSchema: {
         mandate: mandateSchema,
@@ -184,7 +199,9 @@ export function registerOsbpTools(
     "osbp_booking_status",
     {
       title: "Booking status",
-      description: "Read booking status from local idempotency state or the platform's booking records.",
+      description:
+        "Read booking status from local idempotency state or the platform's booking records. " +
+        "After successful booking.create, call this with the receipt booking_id before the final user update when possible.",
       annotations: { readOnlyHint: true },
       inputSchema: {
         booking_id: z.string().optional().describe("Booking id from the booking.create receipt. Omit to probe by customer contact."),
@@ -200,7 +217,9 @@ export function registerOsbpTools(
       title: "Request handoff",
       description:
         "Return a structured local human-handoff request when OSBP cannot safely complete a mutation. " +
-        "This does not notify the merchant, salon, or any human team; tell the user it requires manual follow-up.",
+        "This does not notify the merchant or any human team; tell the user it requires manual follow-up. " +
+        "Do not include customer names, contact details, or addresses in reason or message; reference the " +
+        "customer by an opaque id only.",
       annotations: { readOnlyHint: true },
       inputSchema: {
         reason: z.string(),
@@ -268,11 +287,13 @@ export function toToolResult<T>(result: AdapterResult<T>, auditEvent?: AuditEven
     ? {
       ok: true,
       value: result.value,
+      ...(result.osbp_runtime ? { osbp_runtime: result.osbp_runtime } : {}),
       ...(auditEvent ? { audit_event_id: auditEvent.id } : {})
     }
     : {
       ok: false,
       problem: result.problem,
+      ...(result.osbp_runtime ? { osbp_runtime: result.osbp_runtime } : {}),
       ...(auditEvent ? { audit_event_id: auditEvent.id } : {})
     };
 

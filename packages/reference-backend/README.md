@@ -26,7 +26,7 @@ npm test --workspace @osbp/reference-backend
 
 The smoke command starts the local synthetic HTTP server, targets each seeded organization with the adapter, runs read-only checks, prints a summary, and shuts the server down. No `.env` file is required.
 
-The demo command runs the full mandate-gated booking flow against the same in-process synthetic backend. By default it narrates all four verticals plus an over-cap rejection coda; `--vertical dental|auto|notary|spa` renders one gallery cut. The current launch GIF uses `--launch --tape --gum` for a short Carolyn's Dental happy path that shows actual OSBP JSON requests/results plus the adapter-to-booking-platform GET/POST lines used to satisfy them. Pass `--now <RFC 3339 instant>` for deterministic dates and mandate expiry.
+The demo command runs the full mandate-gated booking flow against the same in-process synthetic backend. By default it narrates all four verticals plus an over-cap rejection coda; `--vertical dental|auto|notary|spa` renders one focused cut. `--launch --tape --gum` produces a compact Carolyn's Dental happy path that shows actual OSBP JSON requests/results plus the adapter-to-booking-platform GET/POST lines used to satisfy them; it is runnable evidence, not a media asset requirement. Pass `--now <RFC 3339 instant>` for deterministic dates and mandate expiry.
 
 ## Test Interface
 

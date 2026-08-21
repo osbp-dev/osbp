@@ -106,12 +106,23 @@ describe("OSBP MCP server", () => {
   it("wires a local Openings adapter and resolves a relative idempotency store path to absolute", () => {
     const adapter = createLocalOpeningsAdapter({
       OPENINGS_API_BASE_URL: "https://api.openings.test",
-      OPENINGS_SALON_SLUG: "demo",
+      OPENINGS_SALON_SLUG: "cedar-house-salon",
       OPENINGS_SALON_ID: "org_01jw3z8x9k2m4n6p8r0s1t3v5w",
+      OPENINGS_ENABLE_CUSTOMER_FALLBACK: "true",
+      OPENINGS_SEND_NOTIFICATIONS: "false",
+      OPENINGS_HTTP_TIMEOUT_MS: "2500",
+      OPENINGS_BEARER_TOKEN: "bearer-token",
+      OPENINGS_API_VERSION: "2026-06-15",
       OSBP_IDEMPOTENCY_STORE_PATH: ".osbp/idempotency/server-test.json"
     });
 
     assert.equal(adapter.platform.vendor, "openings");
+    const runtimeConfig = adapter.config as unknown as Record<string, unknown>;
+    assert.equal(runtimeConfig.enableCustomerFallback, true);
+    assert.equal(runtimeConfig.sendNotifications, false);
+    assert.equal(runtimeConfig.httpTimeoutMs, 2500);
+    assert.equal(runtimeConfig.bearerToken, "bearer-token");
+    assert.equal(runtimeConfig.openingsVersion, "2026-06-15");
     assert.ok(adapter.config.idempotencyStorePath, "store path should be set");
     // The server resolves a relative store path against the repo root so it
     // does not depend on the host's process.cwd() (Claude Desktop spawns the
@@ -201,6 +212,53 @@ describe("OSBP MCP server", () => {
       const handoffValue = (handoffContent as { value: { status: string; reason: string } }).value;
       assert.equal(handoffValue.status, "requires_human");
       assert.equal(handoffValue.reason, "needs_human");
+    } finally {
+      await client.close();
+      await server.close();
+    }
+  });
+
+  it("copies adapter runtime diagnostics into the MCP structured result", async () => {
+    const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
+    const server = createMcpServer(new RuntimeDiagnosticsAdapter());
+    const client = new Client({ name: "osbp-test-client", version: "0.1.0" });
+
+    await server.connect(serverTransport);
+    await client.connect(clientTransport);
+
+    try {
+      const result = await client.callTool({
+        name: "osbp_booking_create",
+        arguments: {
+          mandate: {
+            id: "mandate_1",
+            expires_at: "2030-01-01T00:00:00Z",
+            allowed_actions: ["booking.create"],
+            organization_id: "org_01jw3z8x9k2m4n6p8r0s1t3v5w",
+            max_price: { amount_minor: 10000, currency: "USD" }
+          },
+          idempotency_key: "idem_1",
+          service_id: "service_1",
+          schedule_id: "schedule_1",
+          provider_id: "provider_1",
+          date: "2030-01-02",
+          time: "09:00"
+        }
+      });
+
+      assert.equal(result.isError, false);
+      assert.deepEqual(result.structuredContent, {
+        ok: true,
+        value: {
+          id: "receipt_1",
+          booking_id: "booking_1",
+          text: "Booked."
+        },
+        osbp_runtime: {
+          idempotency: "local_cache_replay",
+          message: "No Openings create call was made; this result was replayed from local OSBP idempotency state."
+        }
+      });
     } finally {
       await client.close();
       await server.close();
@@ -347,5 +405,18 @@ class FakeAdapter implements BookingAdapter {
 class ThrowingAdapter extends FakeAdapter {
   override async describeService(): Promise<AdapterResult<Service>> {
     throw new Error("RAW_UPSTREAM_SECRET token=abc123");
+  }
+}
+
+class RuntimeDiagnosticsAdapter extends FakeAdapter {
+  override async createBooking(input: BookingCreateInput): Promise<AdapterResult<Receipt>> {
+    const result = await super.createBooking(input);
+    return {
+      ...result,
+      osbp_runtime: {
+        idempotency: "local_cache_replay",
+        message: "No Openings create call was made; this result was replayed from local OSBP idempotency state."
+      }
+    };
   }
 }

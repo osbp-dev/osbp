@@ -9,9 +9,7 @@ packages/*/dist/
 .DS_Store
 .env
 .env.*
-!.env.example
 
 # Runtime state and coverage
 .osbp/
 coverage/
-.security/

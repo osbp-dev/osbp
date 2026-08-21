@@ -1,16 +1,27 @@
 import { DEFAULT_CONFORMANCE_FIXTURES, type PartialConformanceFixtures } from "@osbp/conformance";
 import { StarterBookingAdapter } from "./index.js";
 
+// Reserved, non-routable placeholders for the deliberately unimplemented
+// starter/conformance target. Real adapters should require operator-supplied
+// API origins, organization ids, and timeout policy instead of defaulting to a
+// shared or live platform tenant.
+const SYNTHETIC_CONFORMANCE_API_BASE_URL = "https://vendor.example";
+const SYNTHETIC_CONFORMANCE_ORGANIZATION_ID = "org_synthetic_conformance";
+
 export const adapter = new StarterBookingAdapter({
-  apiBaseUrl: process.env.TARGET_API_BASE_URL ?? "https://vendor.example",
-  organizationId: process.env.TARGET_ORGANIZATION_ID ?? "replace-me",
+  apiBaseUrl: process.env.TARGET_API_BASE_URL ?? SYNTHETIC_CONFORMANCE_API_BASE_URL,
+  organizationId: process.env.TARGET_ORGANIZATION_ID ?? SYNTHETIC_CONFORMANCE_ORGANIZATION_ID,
+  httpTimeoutMs: intEnv("TARGET_HTTP_TIMEOUT_MS", 10000),
+  nativeApiVersion: process.env.TARGET_NATIVE_API_VERSION,
+  enableConfiguredCustomerFallback: boolEnv("TARGET_ENABLE_CONFIGURED_CUSTOMER_FALLBACK", false),
+  configuredCustomerFallback: configuredCustomerFallback(),
+  notificationBehavior: notificationBehaviorEnv("TARGET_NOTIFICATION_BEHAVIOR"),
   credentials: {
     apiKey: process.env.TARGET_API_KEY,
     bearerToken: process.env.TARGET_BEARER_TOKEN,
     clientId: process.env.TARGET_CLIENT_ID,
     clientSecret: process.env.TARGET_CLIENT_SECRET
-  },
-  idempotencyStorePath: process.env.OSBP_IDEMPOTENCY_STORE_PATH
+  }
 });
 
 const services = {
@@ -29,9 +40,9 @@ const services = {
 };
 
 export const conformanceFixtures: PartialConformanceFixtures = {
-  organization_id: process.env.TARGET_ORGANIZATION_ID ?? "replace-me",
-  schedule_id: process.env.TARGET_SCHEDULE_ID ?? "replace-me",
-  provider_id: process.env.TARGET_PROVIDER_ID ?? "replace-me",
+  organization_id: process.env.TARGET_ORGANIZATION_ID ?? SYNTHETIC_CONFORMANCE_ORGANIZATION_ID,
+  schedule_id: process.env.TARGET_SCHEDULE_ID ?? "sched_synthetic_conformance",
+  provider_id: process.env.TARGET_PROVIDER_ID ?? "prov_synthetic_conformance",
   date: process.env.TARGET_DATE ?? "2030-05-02",
   time: process.env.TARGET_TIME ?? "10:00",
   customer: {
@@ -75,4 +86,41 @@ function intEnv(name: string, fallback: number): number {
     throw new Error(`${name} must be an integer minor-unit amount`);
   }
   return parsed;
+}
+
+function boolEnv(name: string, fallback: boolean): boolean {
+  const value = process.env[name];
+  if (value === undefined) {
+    return fallback;
+  }
+  if (value === "true") {
+    return true;
+  }
+  if (value === "false") {
+    return false;
+  }
+  throw new Error(`${name} must be true or false`);
+}
+
+function configuredCustomerFallback() {
+  const customer = {
+    id: process.env.TARGET_CONFIGURED_CUSTOMER_ID,
+    phone: process.env.TARGET_CONFIGURED_CUSTOMER_PHONE,
+    email: process.env.TARGET_CONFIGURED_CUSTOMER_EMAIL,
+    given_name: process.env.TARGET_CONFIGURED_CUSTOMER_GIVEN_NAME,
+    family_name: process.env.TARGET_CONFIGURED_CUSTOMER_FAMILY_NAME,
+    display_name: process.env.TARGET_CONFIGURED_CUSTOMER_NAME
+  };
+  return Object.values(customer).some((value) => value !== undefined) ? customer : undefined;
+}
+
+function notificationBehaviorEnv(name: string): "omit" | "operator_configured" {
+  const value = process.env[name];
+  if (value === undefined || value === "omit") {
+    return "omit";
+  }
+  if (value === "operator_configured") {
+    return value;
+  }
+  throw new Error(`${name} must be omit or operator_configured`);
 }

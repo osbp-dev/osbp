@@ -12,7 +12,7 @@
 
 - [ ] `npm run check` passes
 - [ ] `npm test` passes
-- [ ] `npm run conformance` passes (44/44)
+- [ ] `npm run conformance` passes
 - [ ] `npm run spell` passes
 
 <!-- If this touches the spec or schema, note how the change was verified. -->

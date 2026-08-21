@@ -2,24 +2,33 @@
 
 Audience: implementers and reviewers of the v0.1.0 MCP/tool schemas.
 
-- **Status:** implementation-bound proof-of-concept schema
+- **Status:** published proof-of-concept schema
+- **Current revision:** 2026-07-08
 - **Compatibility:** not stable; no public compatibility promise
 
-This document describes the schema currently used by the v0.1.0 proof-of-concept implementation. It is intentionally narrow: one local agent-host path, one synthetic reference backend, one worked Openings adapter, one create-booking flow, local stdio MCP, and redacted local audit events.
+This document describes the schema used by the v0.1.0 proof-of-concept release. It is intentionally narrow: local stdio MCP, the credential-free synthetic reference backend, one worked real-platform adapter, one create-booking flow, and redacted local audit events.
 
-Do not treat this as the long-term OSBP protocol schema. v0.2.0 may revise these shapes for remote MCP hosting, OpenAI/ChatGPT metadata, provider/location resolution, auth context, and multi-currency money objects.
+The v0.1.0 topology is a single appointment: one service, one schedule/location, one provider or staff resource, and one customer/attendee. It is not yet a general booking ontology for classes, group capacity, waitlists, multi-resource appointments, route/dispatch flows, or multi-attendee booking models.
+
+Do not treat this as the long-term OSBP protocol schema. v0.2.0 may revise these shapes for remote MCP hosting, OpenAI/ChatGPT metadata, provider/location resolution, auth context, and richer lifecycle/error semantics.
 
 ## Protocol Model
 
 The proof-of-concept schema is organized around the shared OSBP model: the domain objects, the `BookingMandate`, and the money and time conventions that every tool obeys.
+
+### Internationalization Strategy
+
+OSBP v0.1.0 is global-ready at the protocol boundary, not a server-side localization system. Wire values use canonical machine formats such as ISO 4217 currency codes and minor units, IANA timezones, RFC 3339 instants, merchant-local wall-clock strings, ISO 8601 durations, E.164 phone numbers, RFC 5322/RFC 6531 email addresses, and ISO 3166-1 country codes. The agent or host localizes presentation for the user from those canonical values.
+
+Server-generated prose in v0.1.0 is English and carries no language tag: `Problem.message`, approval summaries, `Receipt.text`, and policy prose such as `cancellation_note` are explanatory, not locale-specific UI. Agents should translate that prose faithfully when the user is not conversing in English, while preserving amounts, merchant-local times, and the merchant-visible customer name exactly as OSBP returned them. Agents must not carry the machine-directed retry instruction or approval token into user-facing text.
 
 ### Core Objects
 
 ```ts
 interface Money {
   // Integer amount in the currency's ISO 4217 minor unit. The exponent varies
-  // by currency (USD and EUR use 2, JPY uses 0, KWD and BHD use 3), so it is not
-  // always cents. Absent for type insurance_dependent, quote_required, or unknown.
+  // by currency (USD/EUR use 2, JPY/CLP/VND use 0, KWD/JOD/TND use 3), so it is
+  // not always cents. Absent for type insurance_dependent, quote_required, or unknown.
   amount_minor?: number
   // ISO 4217 currency code, for example "USD". Required whenever a Money is present.
   currency: string
@@ -41,6 +50,9 @@ interface Service {
   // creating an appointment. Mandate validation fails closed with
   // requires_consultation_handoff.
   requires_consultation?: boolean
+  // Read-side detail only in v0.1.0. booking.create has no option selector, so
+  // agents must not claim an option/add-on was booked unless service_id itself
+  // identifies that exact bookable service.
   options?: ServiceOption[]
 }
 
@@ -69,7 +81,8 @@ interface LocationSchedule {
 interface OperatingHours {
   // ISO 8601 weekday: 1 = Monday through 7 = Sunday. Not JS getDay (0 = Sunday).
   day: number
-  // Wall-clock HH:MM strings in the location's local time.
+  // Wall-clock HH:MM strings in the location's local time. close earlier than
+  // open means the period runs into the following calendar day.
   open: string
   close: string
 }
@@ -129,7 +142,11 @@ interface Policy {
   // Required deposit as a Money object. Checked against max_extra_fee when
   // payment_requirement is "deposit".
   deposit?: Money
-  verification_method?: "sms" | "email" | "unknown"
+  // "none" declares the platform has no customer verification step for this
+  // service. Declarative, not a guarantee: platform risk checks can still
+  // require verification, so agents handle requires_verification fail-closed
+  // wherever it surfaces. "unknown" means the method could not be determined.
+  verification_method?: "sms" | "email" | "none" | "unknown"
   organization?: OrganizationContext
 }
 
@@ -151,11 +168,20 @@ interface OrganizationContext {
 
 interface Customer {
   id?: string
-  // E.164 phone number, for example "+15555550100". Passed through to the platform.
+  // E.164 phone number, for example "+15555550100". Domestic trunk prefixes
+  // such as the leading "0" in some countries are not part of the E.164 value.
+  // Passed through to the platform.
   phone?: string
   // RFC 5322 (or RFC 6531 for internationalized addresses) email address. OSBP
   // passes the value through; the platform enforces its own format.
   email?: string
+  // Optional structured name fields for platforms that require separate
+  // "first"/"last" inputs. Agents and adapters should populate these only when
+  // the user, host profile, or platform supplied them explicitly; name order and
+  // segmentation are locale-dependent.
+  given_name?: string
+  family_name?: string
+  // Human-readable merchant-visible name. Prefer this for user-facing prose.
   display_name?: string
 }
 
@@ -163,6 +189,9 @@ interface Booking {
   id: string
   // Normalized lifecycle status from a closed enum; the adapter maps the
   // platform's native status onto it, defaulting unknown values to "unknown".
+  // A source-specific create mapper may document a narrower receipt-snapshot
+  // default when the platform just confirmed creation, but readback paths must
+  // not turn absent status into "booked".
   status?: "booked" | "cancelled" | "completed" | "no_show" | "pending" | "unknown"
   service_id?: string
   schedule_id?: string
@@ -217,7 +246,7 @@ Every booking mutation must include a `BookingMandate` and an `idempotency_key`.
 
 `expires_at` is an absolute instant and must carry `Z` or an explicit UTC offset. Naked wall-clock strings are rejected as `invalid_mandate`. `earliest_start` and `latest_end` are wall-clock strings in merchant-local time with no offset, compared against `Slot.starts_at_local` and `Slot.ends_at_local`, which follow the same convention. Offset-carrying values on those wall-clock fields are also rejected. The slot's absolute instants `starts_at` / `ends_at` are not part of the wall-clock window comparison.
 
-`service_ids`, `provider_ids`, and `schedule_ids` should constrain the actual create-ready ids used for `booking.create`, not only display labels. Some platforms search availability from a host or location schedule while returning provider-specific schedule and service ids for the booking; the mandate must constrain the create-ready ids, not the search-time ones.
+`service_ids`, `provider_ids`, and `schedule_ids` should constrain the actual create-ready ids used for `booking.create`, not only display labels. Some platforms search availability from a host or location schedule while returning provider-specific schedule and service ids for the booking; the mandate must constrain the create-ready ids, not the search-time ones. Omit a scope field to leave that dimension unrestricted; an empty array is a present but empty allow-list and allows nothing.
 
 ### Money
 
@@ -232,7 +261,7 @@ interface Money {
 }
 ```
 
-`amount_minor` is an integer in the currency's [ISO 4217](https://www.iso.org/iso-4217-currency-codes.html) minor unit. The minor-unit exponent varies by currency: USD and EUR use 2 places, JPY uses 0, KWD and BHD use 3. It is not always cents. `amount_minor` is absent when `type` is `insurance_dependent`, `quote_required`, or `unknown`, where no fixed amount is known at read time.
+`amount_minor` is an integer in the currency's [ISO 4217](https://www.iso.org/iso-4217-currency-codes.html) minor unit. The minor-unit exponent varies by currency: USD and EUR use 2 places, JPY, CLP, and VND use 0, and KWD, JOD, and TND use 3. It is not always cents. For any currency an adapter supports, the exponent must come from current ISO 4217 or CLDR currency data, or from a dated, reviewed snapshot of that data, rather than an unexplained local shortlist; a merchant currency whose exponent is unknown is not safe to onboard. `amount_minor` is absent when `type` is `insurance_dependent`, `quote_required`, or `unknown`, where no fixed amount is known at read time.
 
 `currency` is the ISO 4217 code and is required whenever a `Money` is present, so cross-currency comparisons fail closed instead of guessing.
 
@@ -253,9 +282,11 @@ A concrete slot or booking time is carried two ways at once: an absolute instant
 
 The split is deliberate. Wall-clock fields are intentionally not RFC 3339. Implementations must not add `Z` or a UTC offset to them, and must not strip the offset off the instant fields. The server rejects offset-carrying wall-clock values as `invalid_mandate`; the instant fields must carry an offset. OSBP carries the instant (the adapter computes it from merchant-local time plus the merchant's IANA timezone) but does not reconcile the user's own timezone with merchant-local time; that remains the agent's job.
 
-Timezones use [IANA Time Zone Database](https://www.iana.org/time-zones) names. Customer phone numbers use [E.164](https://www.itu.int/rec/T-REC-E.164). Customer email addresses are [RFC 5322](https://www.rfc-editor.org/rfc/rfc5322) (or [RFC 6531](https://www.rfc-editor.org/rfc/rfc6531) for internationalized addresses) values; OSBP passes the value through and the platform enforces its own format. `OrganizationContext.country` uses [ISO 3166-1 alpha-2](https://www.iso.org/iso-3166-country-codes.html).
+Timezones use [IANA Time Zone Database](https://www.iana.org/time-zones) names. Customer phone numbers use [E.164](https://www.itu.int/rec/T-REC-E.164): a plus sign, country code, and national significant number, with no domestic-only trunk prefix. Agents may normalize a local phone number only when the relevant country is clear from user context, customer profile, or merchant context; otherwise they ask rather than guess. Customer email addresses are [RFC 5322](https://www.rfc-editor.org/rfc/rfc5322) (or [RFC 6531](https://www.rfc-editor.org/rfc/rfc6531) for internationalized addresses) values; OSBP passes the value through and the platform enforces its own format. Customer names have no universal first/last standard: use `display_name` for the merchant-visible name and `given_name` / `family_name` only when structured parts are explicitly available. `OrganizationContext.country` uses [ISO 3166-1 alpha-2](https://www.iso.org/iso-3166-country-codes.html).
 
-Durations are [ISO 8601](https://www.iso.org/iso-8601-date-and-time-format.html) duration strings such as `PT45M` or `PT24H`, not bare integers: `Service.duration`, `ServiceOption.duration`, `Policy.cancellation_window`, and `Policy.late_grace`. `OperatingHours.day` is an ISO 8601 weekday number, 1 = Monday through 7 = Sunday, not the JS `getDay` convention (0 = Sunday); the adapter converts the platform's value.
+Durations are [ISO 8601](https://www.iso.org/iso-8601-date-and-time-format.html) duration strings such as `PT45M` or `PT24H`, not bare integers: `Service.duration`, `ServiceOption.duration`, `Policy.cancellation_window`, and `Policy.late_grace`. `OperatingHours.day` is an ISO 8601 weekday number, 1 = Monday through 7 = Sunday, not the JS `getDay` convention (0 = Sunday); the adapter converts the platform's value. `OperatingHours.close` earlier than `open` means the period runs into the following calendar day, for example `20:00` to `02:00`. Hours are typical display context only; `availability.find` is the authority for bookable time.
+
+`Policy.verification_method` reports the method OSBP can identify for the platform flow. The v0.1.0 enum is `sms`, `email`, `none`, or `unknown`; future methods such as voice or messaging apps should be additive. Agents should not promise a more specific channel, language, sender, or message wording than OSBP reports.
 
 ## Wire Format
 
@@ -295,6 +326,7 @@ Successful tool result:
 {
   ok: true
   value: T
+  osbp_runtime?: AdapterRuntimeDiagnostics
   audit_event_id?: string
 }
 ```
@@ -305,9 +337,12 @@ Failed tool result:
 {
   ok: false
   problem: Problem
+  osbp_runtime?: AdapterRuntimeDiagnostics
   audit_event_id?: string
 }
 ```
+
+`osbp_runtime` is optional diagnostics for agents and operators. It describes how this response was produced, not durable booking truth. In v0.1.0 the only defined value is `idempotency: "local_cache_replay"`, used when an adapter returns a settled result from local OSBP idempotency state instead of calling the booking platform again.
 
 ### Problem
 
@@ -319,7 +354,9 @@ interface Problem {
 }
 ```
 
-Stable `problem.code` values emitted by mandate validation and the reference adapter:
+`problem.code` is the stable machine-readable contract. `problem.message` is explanatory English prose in v0.1.0, not a parsing target; branch on `problem.code` only.
+
+Stable `problem.code` values emitted by v0.1.0 mandate validation and adapters:
 
 | Code | Meaning |
 |---|---|
@@ -338,15 +375,14 @@ Stable `problem.code` values emitted by mandate validation and the reference ada
 | `currency_mismatch` | Selected price currency does not match the mandate cap currency; fail closed for new user approval |
 | `requires_payment_handoff` | Mandate does not allow a required payment or policy fee |
 | `requires_consultation_handoff` | Service requires a consultation/quote workflow v0.1.0 cannot drive |
-| `requires_user_confirmation` | Final confirmation, payment requirement, or amount is unknown. Fail closed before appointment creation |
+| `requires_user_confirmation` | Either final confirmation is required, or a payment requirement or amount is unknown. The final-confirmation challenge is retryable and includes an approval token; the fail-closed validator form is not retryable and carries no token |
 | `requires_verification` | Platform requires customer verification before booking (retryable) |
-| `verification_failed` | The submitted verification code was rejected (wrong or expired); retry the send and verify step |
+| `verification_failed` | The submitted verification code was rejected (wrong or expired); retry the send step and then retry `booking.create` with the new raw code |
 | `slot_taken` | The selected slot is no longer available (retryable) |
 | `idempotency_conflict` | Same `idempotency_key` reused with a different payload |
 | `booking_not_found` | No appointment matches the status query |
 | `booking_status_requires_verification` | Appointment history is gated behind a verification step that v0.1.0 read tools cannot complete. Rely on the `booking.create` receipt or hand off |
 | `rate_limited` | Upstream returned HTTP 429. Back off and retry (retryable) |
-| `verification_not_supported` | Platform has no customer-verification step; `verification.send` and `verification.verify` do not apply |
 | `internal_adapter_error` | An adapter threw unexpectedly; the host caught it and recorded an audited Problem rather than leaking the throw |
 
 Adapters may emit additional adapter-specific codes, for example `missing_config`. The codes above are the protocol-meaningful set.
@@ -384,6 +420,7 @@ interface VerificationVerifyInput {
 interface BookingCreateInput {
   mandate: BookingMandate
   idempotency_key: string
+  // The create-ready service id. v0.1.0 has no option_id/add-on selector.
   service_id: string
   schedule_id: string
   provider_id: string
@@ -405,13 +442,21 @@ interface BookingStatusInput {
   booking_id?: string
   customer?: Customer
 }
+
+interface HandoffRequestInput {
+  reason: string
+  message: string
+  mandate_id?: string
+}
 ```
 
 Read paths can default. `service.describe`, `availability.find`, and `policy.explain` may omit ids that the adapter can substitute from configured proof-of-concept defaults. Mutations do not default: `booking.create` keeps strict required service, schedule, provider, mandate, and idempotency fields.
 
-Final confirmation is an adapter-side gate shared by every OSBP adapter through `requireApproval` in `@osbp/core`. A first valid `booking.create` call with no `approval` returns `requires_user_confirmation` before any appointment create call. The agent must show the exact summary from the problem message to the user, get final confirmation, then retry `booking.create` with the same payload, same `idempotency_key`, `approval.confirmed: true`, and the adapter-issued `approval.token`. `approval` is excluded from the local idempotency payload hash, as is `verification_code`, so an approved retry and a verification retry remain the same logical booking attempt. The token still flows through the agent, so it is a brake, not proof of a real user click; production confirmation belongs in the host/server layer.
+Final confirmation is an adapter-side gate. The reference adapter uses `requireApproval` in `@osbp/core`; other v0.1.0 adapters must enforce equivalent behavior. A first valid `booking.create` call with no `approval` returns `requires_user_confirmation` before any appointment create call. The challenge-form problem message carries a user-facing approval summary followed by a machine-directed retry instruction containing `approval.token`, formatted exactly as `approval.token="<token>"`; the agent must show only the summary to the user, then retry `booking.create` with the same payload, same `idempotency_key`, `approval.confirmed: true`, and the adapter-issued token. `approval` is excluded from the local idempotency payload hash, as is `verification_code`, so an approved retry and a verification retry remain the same logical booking attempt. The token is bound to the pending payload and the resolved summary; if facts such as price or policy text change before retry, the adapter re-challenges with a fresh summary. The token still flows through the agent, so it is a brake, not proof of a real user click; production confirmation belongs in the host/server layer.
 
-For booking verification, call `booking.create` first. If it returns `requires_verification`, call `verification.send`, ask the user for the code, then retry `booking.create` with `verification_code`. Do not call `verification.verify` before booking create for the booking flow.
+Mandate validation can also return `requires_user_confirmation` when the booking cannot be safely bounded, such as unknown payment requirements or non-fixed amounts. That fail-closed form is terminal in v0.1.0: it is not retryable and carries no `approval.token`.
+
+For booking verification, call `booking.create` first. If it returns `requires_verification`, call `verification.send`, ask the user for the code, then retry `booking.create` with `verification_code`. Agents must not call `verification.verify` before booking create for the booking flow; on some platforms, verifying first consumes the code or session and makes the booking retry fail. Adapters that lack a safe non-booking verify primitive should reject `verification.verify` with an adapter-specific `Problem` rather than attempting to simulate it.
 
 ## VerificationChallenge
 
@@ -452,7 +497,7 @@ interface UpstreamMeta {
   deprecation?: string
   // Sunset header (RFC 8594), verbatim HTTP-date.
   sunset?: string
-  // RateLimit, RateLimit-Policy, and X-RateLimit-* headers, keyed lowercase.
+  // Retry-After, RateLimit, RateLimit-Policy, and X-RateLimit-* headers, keyed lowercase.
   ratelimit?: Record<string, string>
 }
 
@@ -477,16 +522,21 @@ interface AuditEvent {
 
 `platform` and `upstream` are operator-observability fields for upstream drift provenance, never agent-facing booking output. They carry no customer data by construction: `upstream.call` is method plus redacted path, and the remaining fields are response headers.
 
-The local v0.1.0 MCP server appends redacted JSONL audit events to `.osbp/audit/events.jsonl` by default. Set `OSBP_AUDIT_LOG_PATH` to override the path.
+The local v0.1.0 MCP server appends redacted JSONL audit events for schema-valid tool calls to `.osbp/audit/events.jsonl` by default. Set `OSBP_AUDIT_LOG_PATH` to override the path.
 
-Audit events must redact customer contact details and verification codes. Checked-in traces should use audit aliases rather than raw local audit records. `input_hash` and `result_hash` are hex SHA-256 digests of the redacted snapshots.
+Audit events must redact structured customer contact and name fields, verification codes, approval tokens, contact-shaped phone/email strings in free text, and known sensitive strings discovered from structured input. Freeform tool text cannot reliably identify arbitrary names or addresses that appear nowhere else in structured input, so agents must not put those details in `handoff.request` `reason` or `message`. Checked-in traces must use audit aliases rather than raw local audit records. `input_hash` and `result_hash` are hex SHA-256 digests of the redacted snapshots.
 
 ## Adapter Interface
 
 ```ts
+interface AdapterRuntimeDiagnostics {
+  idempotency?: "local_cache_replay"
+  message?: string
+}
+
 type AdapterResult<T> =
-  | { ok: true; value: T }
-  | { ok: false; problem: Problem }
+  | { ok: true; value: T; osbp_runtime?: AdapterRuntimeDiagnostics }
+  | { ok: false; problem: Problem; osbp_runtime?: AdapterRuntimeDiagnostics }
 
 interface BookingAdapter {
   // Static platform identity and most-recent upstream response metadata,

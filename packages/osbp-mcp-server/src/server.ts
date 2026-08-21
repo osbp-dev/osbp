@@ -107,7 +107,7 @@ if (isInvokedAsScript(import.meta.url)) {
       if (upstream?.deprecation || upstream?.sunset) {
         console.log(`Upstream lifecycle: deprecation=${upstream.deprecation ?? "none"} sunset=${upstream.sunset ?? "none"}`);
       }
-      console.log(`Organization: ${result.value.salon.name ?? result.value.salon.slug ?? result.value.salon.id}`);
+      console.log(`Organization: ${result.value.organization.name ?? result.value.organization.slug ?? result.value.organization.id}`);
       console.log(`Locations: ${result.value.locations.length}`);
       console.log(`Services: ${result.value.services.length}`);
       console.log(`Payment requirement: ${result.value.policy.payment_requirement ?? "unknown"}`);
@@ -115,8 +115,14 @@ if (isInvokedAsScript(import.meta.url)) {
     }
   } else {
     console.error(describeServer());
-    console.error(`Platform: ${adapter.platform.vendor} ${adapter.platform.api_version} (${config.apiBaseUrl})`);
-    console.error(`Organization slug: ${config.salonSlug}`);
+    console.error(`Platform: ${adapter.platform.vendor} ${adapter.platform.api_version} (${config.apiBaseUrl ?? "not configured"})`);
+    if (config.salonId) {
+      console.error(`Organization id: ${config.salonId}`);
+    } else if (config.salonSlug) {
+      console.error(`Organization slug: ${config.salonSlug}`);
+    } else {
+      console.error("Organization: not configured");
+    }
     await runStdioServer(process.env, adapter);
   }
 }

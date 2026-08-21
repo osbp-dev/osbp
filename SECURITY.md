@@ -16,7 +16,7 @@ We aim to acknowledge a report within a few business days and will keep you upda
 
 ## Scope
 
-OSBP is a pre-1.0 proof of concept. It authorizes bookings under a user-approved `BookingMandate`, fails closed on unknown or unauthorized states, and does not move money. Reports about the mandate trust boundary, local idempotency, audit and trace redaction, or adapter safety are especially welcome.
+OSBP is a pre-1.0 proof of concept. It authorizes bookings under a user-approved `BookingMandate`, fails closed on unknown or unauthorized states, and does not move money. In v0.1.0 the mandate is unsigned JSON validated structurally rather than cryptographically; production mandate signing is outside this proof-of-concept release. Reports about the mandate trust boundary, local idempotency, audit and trace redaction, or adapter safety are especially welcome.
 
 ## Supported versions
 

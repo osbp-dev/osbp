@@ -32,6 +32,36 @@ const defaultTraceFiles = [
   "traces/v0.1.0/reference-auto-timezone-currency.json",
   "traces/v0.1.0/reference-dental-idempotent-retry.json"
 ];
+const CURRENCY_MINOR_UNIT_EXPONENT = {
+  // Snapshot reviewed against ISO 4217 / CLDR on 2026-07-07; recheck before
+  // changing this table or onboarding a new merchant currency.
+  BIF: 0,
+  CLP: 0,
+  DJF: 0,
+  GNF: 0,
+  ISK: 0,
+  JPY: 0,
+  KMF: 0,
+  KRW: 0,
+  PYG: 0,
+  RWF: 0,
+  UGX: 0,
+  UYI: 0,
+  VND: 0,
+  VUV: 0,
+  XAF: 0,
+  XOF: 0,
+  XPF: 0,
+  BHD: 3,
+  IQD: 3,
+  JOD: 3,
+  KWD: 3,
+  LYD: 3,
+  OMR: 3,
+  TND: 3,
+  CLF: 4,
+  UYW: 4
+};
 const requestedTraceFiles = process.argv.slice(2);
 const tracePaths = (requestedTraceFiles.length > 0 ? requestedTraceFiles : defaultTraceFiles)
   .map((traceFile) => resolve(root, traceFile));
@@ -43,7 +73,9 @@ for (const [index, tracePath] of tracePaths.entries()) {
     console.log("");
   }
   const trace = JSON.parse(readFileSync(tracePath, "utf8"));
-  if (Array.isArray(trace.steps)) {
+  if (Array.isArray(trace.steps) && trace.recorded === true) {
+    validateRecordedTrace(tracePath, trace);
+  } else if (Array.isArray(trace.steps)) {
     await replayTrace(tracePath, trace);
   } else if (Array.isArray(trace.tool_calls)) {
     validateRecordedTrace(tracePath, trace);
@@ -62,14 +94,21 @@ async function replayTrace(tracePath, trace) {
     });
 
     const guardrails = [];
+    const state = {
+      approvalToken: undefined
+    };
     let replayed = 0;
     for (const step of trace.steps) {
-      const actual = await callTool(adapter, step.tool, step.input);
-      assertSubset(actual, step.result, step.tool);
+      const input = materializeInput(step.tool, step.input, state);
+      const actual = await callTool(adapter, step.tool, input);
+      if (step.tool === "booking.create" && actual.ok === false && actual.problem?.code === "requires_user_confirmation") {
+        state.approvalToken = extractApprovalToken(actual.problem.message) ?? state.approvalToken;
+      }
+      assertSubset(normalizeResultForTrace(actual), step.result, step.tool);
       for (const absentPath of step.assert_absent ?? []) {
         assert.equal(readPath(actual, absentPath), undefined, `${step.tool}.${absentPath}: expected field to be absent`);
       }
-      if (step.result?.ok === false) {
+      if (step.result?.ok === false && step.approval_preflight !== true) {
         guardrails.push(actual.problem?.code ?? "unknown_problem");
         if (step.platform_write === false) {
           assert.equal(actual.ok, false, `${step.tool}: expected no platform write guardrail`);
@@ -102,15 +141,24 @@ async function replayTrace(tracePath, trace) {
 }
 
 function validateRecordedTrace(tracePath, trace) {
-  assert.ok(trace.trace_id, `${relativeTracePath(tracePath)}: missing trace_id`);
-  assert.ok(trace.user_request, `${relativeTracePath(tracePath)}: missing user_request`);
-  assert.ok(trace.mandate, `${relativeTracePath(tracePath)}: missing mandate`);
-  assert.ok(trace.tool_calls.length > 0, `${relativeTracePath(tracePath)}: expected at least one tool call`);
+  const calls = recordedTraceCalls(trace);
+  assert.ok(trace.trace_id || trace.name, `${relativeTracePath(tracePath)}: missing trace_id or name`);
+  assert.notEqual(summarizeUserRequest(trace), "not provided", `${relativeTracePath(tracePath)}: missing user_request`);
+  assert.notEqual(summarizeBookingMandates(trace), "none in trace", `${relativeTracePath(tracePath)}: missing mandate`);
+  assert.ok(calls.length > 0, `${relativeTracePath(tracePath)}: expected at least one recorded step or tool call`);
 
-  for (const [index, call] of trace.tool_calls.entries()) {
-    assert.ok(call.tool, `${relativeTracePath(tracePath)}.tool_calls[${index}]: missing tool`);
-    assert.ok(call.input !== undefined, `${relativeTracePath(tracePath)}.tool_calls[${index}]: missing input`);
-    assert.ok(call.output !== undefined, `${relativeTracePath(tracePath)}.tool_calls[${index}]: missing output`);
+  for (const call of calls) {
+    assert.ok(call.tool, `${call.label}: missing tool`);
+    assert.ok(call.input !== undefined, `${call.label}: missing input`);
+    assert.ok(call.output !== undefined, `${call.label}: missing output`);
+    if (call.stepShaped) {
+      assert.equal(typeof call.output.ok, "boolean", `${call.label}.result.ok must be boolean`);
+      if (call.output.ok) {
+        assert.ok("value" in call.output, `${call.label}.result ok:true must carry value`);
+      } else {
+        assert.ok(call.output.problem, `${call.label}.result ok:false must carry problem`);
+      }
+    }
   }
 
   console.log(`${style.dim("Runner:")} ${style.dim("scripts/run-reference-trace.mjs")}`);
@@ -120,9 +168,29 @@ function validateRecordedTrace(tracePath, trace) {
   console.log("");
   console.log(`${style.cyan("Booking Mandate:")} ${summarizeBookingMandates(trace)}`);
   console.log("");
-  console.log(`${style.green("Result:")} recorded ${trace.tool_calls.length} tool call(s)`);
+  console.log(`${style.green("Result:")} recorded ${calls.length} ${Array.isArray(trace.steps) ? "step(s)" : "tool call(s)"}`);
   console.log(`${style.green("Guardrail triggered:")} none`);
   console.log(`${style.dim("Trace file:")} ${relativeTracePath(tracePath)}`);
+}
+
+function recordedTraceCalls(trace) {
+  if (Array.isArray(trace.steps)) {
+    return trace.steps.map((step, index) => ({
+      tool: step.tool,
+      input: step.input,
+      output: step.result,
+      label: `${trace.name ?? trace.trace_id ?? "recorded trace"}.steps[${index}]`,
+      stepShaped: true
+    }));
+  }
+
+  return (trace.tool_calls ?? []).map((call, index) => ({
+    tool: call.tool,
+    input: call.input,
+    output: call.output,
+    label: `${trace.trace_id ?? trace.name ?? "recorded trace"}.tool_calls[${index}]`,
+    stepShaped: false
+  }));
 }
 
 function shouldUseColor() {
@@ -143,26 +211,14 @@ function summarizeScenario(trace) {
   if (trace.scenario?.title || trace.scenario?.intent || trace.name) {
     return trace.scenario.title ?? trace.scenario.intent ?? trace.name;
   }
+  if (trace.trace_id?.includes("openings")) {
+    return "Openings redacted live booking";
+  }
   return trace.trace_id ?? "Recorded OSBP trace";
 }
 
 function summarizeUserRequest(trace) {
   return trace.scenario?.user_request ?? trace.user_request ?? trace.scenario?.intent ?? "not provided";
-}
-
-async function createBookingWithApproval(adapter, input) {
-  // Transparent final-confirmation handshake so replayed traces book through
-  // the same gate a real adapter enforces, without threading a dynamic token
-  // through the static trace fixtures.
-  const first = await adapter.createBooking(input);
-  if (first.ok || first.problem?.code !== "requires_user_confirmation") {
-    return first;
-  }
-  const token = first.problem.message?.match(/approval\.token="([^"]+)"/)?.[1];
-  if (!token) {
-    return first;
-  }
-  return adapter.createBooking({ ...input, approval: { confirmed: true, token } });
 }
 
 async function callTool(adapter, tool, input) {
@@ -174,12 +230,40 @@ async function callTool(adapter, tool, input) {
     case "policy.explain":
       return adapter.explainPolicy(input);
     case "booking.create":
-      return createBookingWithApproval(adapter, input);
+      return adapter.createBooking(input);
     case "booking.status":
       return adapter.getBooking(input);
     default:
       throw new Error(`Unsupported trace tool ${tool}`);
   }
+}
+
+function materializeInput(tool, input, state) {
+  const materialized = structuredClone(input);
+  if (tool === "booking.create" && materialized?.approval?.token === "[redacted]") {
+    if (!state.approvalToken) {
+      throw new Error("Trace asks for a redacted approval token before a preflight produced one");
+    }
+    materialized.approval.token = state.approvalToken;
+  }
+  return materialized;
+}
+
+function normalizeResultForTrace(result) {
+  const normalized = structuredClone(result);
+  if (normalized?.ok === false && typeof normalized.problem?.message === "string") {
+    normalized.problem.message = redactApprovalToken(normalized.problem.message);
+  }
+  return normalized;
+}
+
+function extractApprovalToken(message) {
+  return /approval\.token=(?:"([^"]+)"|(\S+))/.exec(message ?? "")?.[1]
+    ?? /approval\.token=(?:"([^"]+)"|(\S+))/.exec(message ?? "")?.[2];
+}
+
+function redactApprovalToken(message) {
+  return message.replace(/approval\.token=(?:"[^"]+"|\S+)/g, 'approval.token="[redacted]"');
 }
 
 function assertSubset(actual, expected, path) {
@@ -267,22 +351,22 @@ function formatMoney(money) {
   if (money.amount_minor === undefined) {
     return money.currency;
   }
-  const amount = money.amount_minor / (10 ** currencyExponent(money.currency));
+  const exponent = currencyExponent(money.currency);
+  const amount = money.amount_minor / (10 ** exponent);
   try {
-    return new Intl.NumberFormat("en-US", { style: "currency", currency: money.currency }).format(amount);
+    return new Intl.NumberFormat("en-US", {
+      style: "currency",
+      currency: money.currency,
+      minimumFractionDigits: exponent,
+      maximumFractionDigits: exponent
+    }).format(amount);
   } catch {
     return `${money.amount_minor} ${money.currency} minor units`;
   }
 }
 
 function currencyExponent(currency) {
-  if (["JPY", "KRW"].includes(currency)) {
-    return 0;
-  }
-  if (["BHD", "KWD", "OMR", "TND"].includes(currency)) {
-    return 3;
-  }
-  return 2;
+  return CURRENCY_MINOR_UNIT_EXPONENT[currency.toUpperCase()] ?? 2;
 }
 
 function readPath(value, path) {

@@ -1,21 +1,38 @@
 #!/usr/bin/env node
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
-import { resolve } from "node:path";
+import { isAbsolute, resolve } from "node:path";
 import {
+  inspectOpeningsIdempotencyKey,
   OpeningsAdapter,
   loadOpeningsConfigFromEnv,
-  loadOsbpEnv
+  loadOsbpEnv,
+  removeOpeningsIdempotencyKey
 } from "../../../packages/openings-adapter/dist/index.js";
 
 const repoRoot = resolve(import.meta.dirname, "../../..");
 const liveBookingApproved = process.argv.includes("--approve-live-booking");
+const preflightLiveBooking = process.argv.includes("--preflight-live-booking");
+const resetGoldenIdempotency = process.argv.includes("--reset-golden-idempotency");
+const goldenTraceIdempotencyKey = "idem_openings_v0_1_0_create_001";
 // Relayed OTP for the Openings SMS verification gate. Obtain it out of band
 // (sendVerification + an SMS receiver), then pass --code=NNNN to complete a
 // real booking. Without it, the create call fails closed at requires_verification.
 const verificationCode = (process.argv.find((a) => a.startsWith("--code=")) || "").split("=")[1];
 // Layered: root .env.local wins over this example's .env.local; process.env wins over both.
 const env = { ...loadOsbpEnv(repoRoot), ...process.env };
-const adapter = new OpeningsAdapter(loadOpeningsConfigFromEnv(env));
+const config = loadOpeningsConfigFromEnv(env);
+if (config.idempotencyStorePath && !isAbsolute(config.idempotencyStorePath)) {
+  config.idempotencyStorePath = resolve(repoRoot, config.idempotencyStorePath);
+}
+prepareGoldenTraceIdempotency(config.idempotencyStorePath, {
+  approveLiveBooking: liveBookingApproved || preflightLiveBooking,
+  reset: resetGoldenIdempotency
+});
+if (preflightLiveBooking) {
+  console.log("Golden-trace live-booking preflight passed.");
+  process.exit(0);
+}
+const adapter = new OpeningsAdapter(config);
 
 const trace = await buildTrace(adapter, liveBookingApproved, verificationCode);
 const tracePath = resolve(repoRoot, "traces/v0.1.0/openings-create.json");
@@ -48,6 +65,48 @@ if (trace.selected_slot) {
   console.log(`Selected slot: ${trace.selected_slot.starts_at_local} (tz ${trace.selected_slot.schedule_timezone ?? "unknown"}, instant ${trace.selected_slot.starts_at ?? "unknown"})`);
 }
 
+function prepareGoldenTraceIdempotency(storePath, { approveLiveBooking, reset }) {
+  if (reset) {
+    if (!storePath) {
+      console.warn("--reset-golden-idempotency requested, but no persistent OSBP_IDEMPOTENCY_STORE_PATH is configured; in-memory stores cannot be reset across process runs.");
+    } else {
+      const removed = removeOpeningsIdempotencyKey(storePath, goldenTraceIdempotencyKey);
+      console.log(removed
+        ? `Removed fixed golden-trace idempotency key from ${storePath}: ${goldenTraceIdempotencyKey}`
+        : approveLiveBooking
+          ? `No fixed golden-trace idempotency key was removed from ${storePath}; verifying store integrity before live booking.`
+          : `No fixed golden-trace idempotency key found in ${storePath}: ${goldenTraceIdempotencyKey}`);
+    }
+  }
+
+  if (!approveLiveBooking) {
+    return;
+  }
+
+  if (!storePath) {
+    console.warn("No persistent OSBP_IDEMPOTENCY_STORE_PATH is configured; the golden-trace idempotency guard cannot preflight in-memory stores across process runs.");
+    return;
+  }
+
+  let idempotencyInspection;
+  try {
+    idempotencyInspection = inspectOpeningsIdempotencyKey(storePath, goldenTraceIdempotencyKey);
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error);
+    throw new Error(
+      `Refusing live golden-trace booking because the configured idempotency store ${storePath} could not be verified: ${message}`
+    );
+  }
+
+  if (idempotencyInspection.keyPresent) {
+    throw new Error(
+      `Refusing live golden-trace booking because ${goldenTraceIdempotencyKey} already exists in ${storePath}. ` +
+      "Re-run with --reset-golden-idempotency only if you intend to create another controlled live appointment; " +
+      "clean up controlled live appointments with tools/local-harness/cancel-live-test.mjs."
+    );
+  }
+}
+
 async function buildTrace(adapter, approveLiveBooking, verificationCode) {
   const serviceId = adapter.config.serviceIds[0];
   const scheduleId = adapter.config.scheduleIds[0];
@@ -66,18 +125,22 @@ async function buildTrace(adapter, approveLiveBooking, verificationCode) {
     throw new Error("No availability found in the next 14 days");
   }
 
+  const configuredCustomerId = adapter.config.customerId ?? adapter.config.testCustomerId;
+  const configuredCustomerPhone = adapter.config.customerPhone ?? adapter.config.testCustomerPhone;
+  const configuredCustomerDisplayName = "Jane Smith";
+  const textRedactionSecrets = [configuredCustomerDisplayName];
   const aliases = createTraceAliases({
     serviceId,
     selectedServiceId: selectedSlot.service_id,
     scheduleId,
     selectedScheduleId: selectedSlot.schedule_id,
     selectedProviderId: selectedSlot.provider_id,
-    customerId: adapter.config.testCustomerId
+    customerId: configuredCustomerId
   });
   seedAvailabilityAliases(aliases, availability.slots);
   // Build the price cap as a Money whose currency matches the selected price,
   // or the validator's cross-currency guard rejects the booking. Falls back to
-  // the slot/service currency, then USD for the demo salon.
+  // the slot/service currency, then USD for the configured Openings business.
   const capCurrency =
     selectedSlot.price?.currency ?? service.price?.currency ?? "USD";
   const capAmountMinor = service.price?.amount_minor ?? 10000;
@@ -89,7 +152,7 @@ async function buildTrace(adapter, approveLiveBooking, verificationCode) {
     // is comfortably valid. (The read-only path never validates this.)
     expires_at: new Date(Date.now() + 24 * 60 * 60 * 1000).toISOString(),
     allowed_actions: ["booking.create"],
-    organization_id: "openings_demo_salon",
+    organization_id: "openings_business",
     service_ids: [aliases.service(selectedSlot.service_id)],
     provider_ids: selectedSlot.provider_id ? [aliases.provider(selectedSlot.provider_id)] : undefined,
     schedule_ids: [aliases.schedule(selectedSlot.schedule_id)],
@@ -113,7 +176,7 @@ async function buildTrace(adapter, approveLiveBooking, verificationCode) {
       provider_ids: selectedSlot.provider_id ? [selectedSlot.provider_id] : undefined,
       schedule_ids: [selectedSlot.schedule_id]
     },
-    idempotency_key: "idem_openings_v0_1_0_create_001",
+    idempotency_key: goldenTraceIdempotencyKey,
     service_id: selectedSlot.service_id,
     schedule_id: selectedSlot.schedule_id,
     provider_id: selectedSlot.provider_id ?? adapter.config.providerUserIds[0],
@@ -121,8 +184,9 @@ async function buildTrace(adapter, approveLiveBooking, verificationCode) {
     date: selectedSlot.starts_at_local.slice(0, 10),
     time: selectedSlot.starts_at_local.slice(11, 16),
     customer: {
-      id: adapter.config.testCustomerId,
-      phone: adapter.config.testCustomerPhone
+      id: configuredCustomerId,
+      phone: configuredCustomerPhone,
+      display_name: configuredCustomerDisplayName
     },
     ...(verificationCode ? { verification_code: verificationCode } : {})
   };
@@ -133,11 +197,12 @@ async function buildTrace(adapter, approveLiveBooking, verificationCode) {
     generated_at: new Date().toISOString(),
     source: "osbp-v0.1.0-local",
     redaction: {
-      live_fixture_ids: "aliased",
+      live_business_ids: "aliased",
       customer_phone: "redacted",
+      customer_name: "redacted",
       verification_code: "redacted"
     },
-    user_request: "Book me one safe test appointment at the Openings demo salon. Ask for final approval before booking.",
+    user_request: "Book one controlled live appointment at the configured Openings business. Ask for final approval before booking.",
     mandate,
     tool_calls: [
       {
@@ -175,7 +240,7 @@ async function buildTrace(adapter, approveLiveBooking, verificationCode) {
     ],
     selected_slot: redactSlot(selectedSlot, aliases, "slot_selected"),
     policy_readback: redactPolicy(policy, aliases),
-    final_approval_text: `Approve booking ${service.name} at ${selectedSlot.starts_at_local} with ${aliases.provider(selectedSlot.provider_id)}?`,
+    final_approval_text: redactFreeText(approvalText(service, selectedSlot, policy), textRedactionSecrets),
     audit_event_ids: [
       "aud_service_describe_001",
       "aud_availability_find_001",
@@ -200,74 +265,112 @@ async function buildTrace(adapter, approveLiveBooking, verificationCode) {
   // returns requires_user_confirmation with a one-time token; relay it back with
   // approval.confirmed=true to complete the booking, the same two-step handshake
   // an agent host performs after the user approves the summary.
-  let createResult = await adapter.createBooking(bookingInput);
-  if (!createResult.ok && createResult.problem.code === "requires_user_confirmation") {
-    const token = createResult.problem.message.match(/approval\.token=(?:"([^"]+)"|(\S+))/)?.[1];
-    if (token) {
-      createResult = await adapter.createBooking({
-        ...bookingInput,
-        approval: { confirmed: true, token }
-      });
-    }
-  }
-  const bookingCreateCall = {
+  const preflightResult = await adapter.createBooking(bookingInput);
+  const bookingCreatePreflightCall = {
     tool: "osbp_booking_create",
     input: {
       ...redactBookingInput(bookingInput, aliases),
       mandate
     },
-    output: createResult.ok
+    output: preflightResult.ok
       ? {
-        receipt: redactReceipt(createResult.value, aliases)
+        receipt: redactReceipt(preflightResult.value, aliases, textRedactionSecrets)
       }
       : {
-        problem: createResult.problem
+        problem: redactProblem(preflightResult.problem, textRedactionSecrets)
       }
+  };
+
+  const bookingCreateCalls = [bookingCreatePreflightCall];
+  let finalApprovalText = preflightResult.ok
+    ? baseTrace.final_approval_text
+    : redactFreeText(
+      approvalSummaryFromProblem(preflightResult.problem.message) ?? baseTrace.final_approval_text,
+      textRedactionSecrets
+    );
+  let createResult = preflightResult;
+  let approvedBookingInput = bookingInput;
+
+  if (!preflightResult.ok && preflightResult.problem.code === "requires_user_confirmation") {
+    const token = approvalTokenFromProblem(preflightResult.problem.message);
+    if (token) {
+      approvedBookingInput = {
+        ...bookingInput,
+        approval: { confirmed: true, token }
+      };
+      createResult = await adapter.createBooking(approvedBookingInput);
+      bookingCreateCalls.push({
+        tool: "osbp_booking_create",
+        input: {
+          ...redactBookingInput(approvedBookingInput, aliases),
+          mandate
+        },
+        output: createResult.ok
+          ? {
+            receipt: redactReceipt(createResult.value, aliases, textRedactionSecrets)
+          }
+          : {
+            problem: redactProblem(createResult.problem, textRedactionSecrets)
+          }
+      });
+    }
+  }
+  const bookingCreateCall = {
+    output: bookingCreateCalls.at(-1).output
   };
 
   if (!createResult.ok) {
     return {
       ...baseTrace,
+      final_approval_text: finalApprovalText,
       status: createResult.problem.code === "requires_verification"
         ? "requires_verification"
         : "booking_create_failed",
-      tool_calls: [...baseTrace.tool_calls, bookingCreateCall],
+      tool_calls: [...baseTrace.tool_calls, ...bookingCreateCalls],
       unique_ids: summarizeAliases(aliases),
+      booking_create_preflight: bookingCreatePreflightCall.output,
       booking_create: bookingCreateCall.output,
       receipt: null,
-      audit_event_ids: [...baseTrace.audit_event_ids, "aud_booking_create_001"]
+      audit_event_ids: [
+        ...baseTrace.audit_event_ids,
+        "aud_booking_create_preflight_001",
+        ...(bookingCreateCalls.length > 1 ? ["aud_booking_create_001"] : [])
+      ]
     };
   }
 
   const statusResult = await adapter.getBooking({
     booking_id: createResult.value.booking_id,
-    customer: bookingInput.customer
+    customer: approvedBookingInput.customer
   });
 
   return {
     ...baseTrace,
+    final_approval_text: finalApprovalText,
     status: "booked",
     tool_calls: [
       ...baseTrace.tool_calls,
-      bookingCreateCall,
+      ...bookingCreateCalls,
       {
         tool: "osbp_booking_status",
         input: {
           booking_id: aliases.booking(createResult.value.booking_id),
           customer: {
-            id: aliases.customer(bookingInput.customer.id),
+            id: aliases.customer(approvedBookingInput.customer.id),
             phone: "[redacted]"
           }
         },
-        output: statusResult.ok ? { booking: redactBooking(statusResult.value, aliases) } : { problem: statusResult.problem }
+        output: statusResult.ok ? { booking: redactBooking(statusResult.value, aliases) } : { problem: redactProblem(statusResult.problem, textRedactionSecrets) }
       }
     ],
     unique_ids: summarizeAliases(aliases),
+    booking_create_preflight: bookingCreatePreflightCall.output,
     booking_create: bookingCreateCall.output,
     booking_status: statusResult.ok ? redactBooking(statusResult.value, aliases) : null,
-    receipt: redactReceipt(createResult.value, aliases),
+    receipt: redactReceipt(createResult.value, aliases, textRedactionSecrets),
     audit_event_ids: [
       ...baseTrace.audit_event_ids,
+      "aud_booking_create_preflight_001",
       "aud_booking_create_001",
       "aud_booking_status_001"
     ]
@@ -347,11 +450,11 @@ function createTraceAliases({
     ]),
     provider: createIdAliaser("provider", [[selectedProviderId, "provider_selected"]]),
     booking: createIdAliaser("booking"),
-    customer: createIdAliaser("customer", [[customerId, "test_customer"]])
+    customer: createIdAliaser("customer", [[customerId, "customer_configured"]], "customer_configured")
   };
 }
 
-function createIdAliaser(prefix, pinned = []) {
+function createIdAliaser(prefix, pinned = [], firstGeneratedAlias) {
   const liveToAlias = new Map();
   const usedAliases = new Set();
 
@@ -369,7 +472,9 @@ function createIdAliaser(prefix, pinned = []) {
 
     if (!liveToAlias.has(liveId)) {
       let index = liveToAlias.size + 1;
-      let alias = `${prefix}_${index}`;
+      let alias = firstGeneratedAlias && !usedAliases.has(firstGeneratedAlias)
+        ? firstGeneratedAlias
+        : `${prefix}_${index}`;
       while (usedAliases.has(alias)) {
         index += 1;
         alias = `${prefix}_${index}`;
@@ -407,13 +512,72 @@ function summarizeAliases(aliases) {
   };
 }
 
-function redactReceipt(receipt, aliases) {
+function redactReceipt(receipt, aliases, textRedactionSecrets = []) {
   const bookingId = aliases.booking(receipt.booking_id);
   return {
-    ...receipt,
+    id: "receipt_openings_create_001",
     booking_id: bookingId,
-    text: receipt.text.replaceAll(receipt.booking_id, bookingId)
+    text: redactFreeText(receipt.text.replaceAll(receipt.booking_id, bookingId), textRedactionSecrets)
   };
+}
+
+function redactProblem(problem, textRedactionSecrets = []) {
+  return {
+    code: problem.code,
+    message: redactFreeText(problem.message, textRedactionSecrets),
+    retryable: problem.retryable
+  };
+}
+
+function approvalTokenFromProblem(message) {
+  const tokenMatch = message.match(/approval\.token=(?:"([^"]+)"|(\S+))/);
+  return tokenMatch?.[1] ?? tokenMatch?.[2];
+}
+
+function approvalSummaryFromProblem(message) {
+  const prefix = "User-facing approval summary: ";
+  const suffix = " Agent retry instruction:";
+  const start = message.indexOf(prefix);
+  const end = message.indexOf(suffix);
+  if (start === -1 || end === -1 || end <= start) {
+    return undefined;
+  }
+  return message.slice(start + prefix.length, end).trim();
+}
+
+function redactFreeText(text, textRedactionSecrets = []) {
+  let redacted = text;
+  for (const secret of textRedactionSecrets) {
+    const value = secret?.trim();
+    if (value) {
+      redacted = redacted.replace(new RegExp(escapeRegExp(value), "gi"), "[redacted]");
+    }
+  }
+  return redacted
+    .replace(/approval\.token=(?:"[^"]+"|\S+)/g, 'approval.token="[redacted]"')
+    .replace(/[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}/gi, "[redacted]")
+    .replace(/\+?\d[\d\s().-]{6,}\d/g, (match) => {
+      const digits = match.replace(/\D/g, "");
+      const phoneish = match.trim().startsWith("+") || digits.length >= 10 || /[()]/.test(match);
+      return digits.length >= 7 && phoneish ? "[redacted]" : match;
+    });
+}
+
+function escapeRegExp(value) {
+  return value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+}
+
+function approvalText(service, slot, policy) {
+  const price = slot.price?.display ?? service.price?.display;
+  const provider = slot.provider_name ? ` with ${slot.provider_name}` : "";
+  const location = slot.schedule_name
+    ? ` at ${slot.schedule_name}${slot.schedule_address ? ` (${slot.schedule_address})` : ""}`
+    : "";
+  const priceText = price ? `, priced at ${price}` : "";
+  const policyText = policy.payment_requirement && policy.payment_requirement !== "none"
+    ? ` Policy/payment requirement: ${policy.payment_requirement}.`
+    : " No upfront payment or deposit is required to book.";
+  return `Approve ${service.name} on ${slot.starts_at_local} merchant-local time${provider}${location}${priceText}.${policyText}`;
 }
 
 function redactPolicy(policy, aliases) {
@@ -432,7 +596,7 @@ function redactPolicy(policy, aliases) {
 }
 
 function redactBookingInput(input, aliases) {
-  return {
+  const redacted = {
     idempotency_key: input.idempotency_key,
     service_id: aliases.service(input.service_id),
     schedule_id: aliases.schedule(input.schedule_id),
@@ -444,6 +608,22 @@ function redactBookingInput(input, aliases) {
       phone: "[redacted]"
     }
   };
+  if (input.customer.display_name) {
+    redacted.customer.display_name = "[redacted]";
+  }
+  if (input.customer.given_name) {
+    redacted.customer.given_name = "[redacted]";
+  }
+  if (input.customer.family_name) {
+    redacted.customer.family_name = "[redacted]";
+  }
+  if (input.approval) {
+    redacted.approval = {
+      confirmed: input.approval.confirmed,
+      token: "[redacted]"
+    };
+  }
+  return redacted;
 }
 
 function redactBooking(booking, aliases) {

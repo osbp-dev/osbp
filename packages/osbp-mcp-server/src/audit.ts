@@ -1,6 +1,6 @@
 import type { AdapterResult, AuditEvent, OsbpToolName, PlatformIdentity, Problem, UpstreamMeta } from "@osbp/core";
 import { appendFileSync, mkdirSync } from "node:fs";
-import { dirname, resolve } from "node:path";
+import { dirname, isAbsolute, resolve } from "node:path";
 import { createHash, randomUUID } from "node:crypto";
 
 export interface AuditToolCallInput<T> {
@@ -34,12 +34,17 @@ export function defaultAuditLogPath(
   env: Record<string, string | undefined> = process.env,
   baseDir: string = process.cwd()
 ): string {
-  return env.OSBP_AUDIT_LOG_PATH ?? resolve(baseDir, ".osbp/audit/events.jsonl");
+  const configured = env.OSBP_AUDIT_LOG_PATH;
+  if (configured) {
+    return isAbsolute(configured) ? configured : resolve(baseDir, configured);
+  }
+  return resolve(baseDir, ".osbp/audit/events.jsonl");
 }
 
 export function createAuditEvent<T>(input: AuditToolCallInput<T>): AuditEvent {
-  const redactedInput = redact(input.input);
-  const redactedResult = redactResult(input.result);
+  const secrets = collectSensitiveStrings(input.input);
+  const redactedInput = redact(input.input, secrets);
+  const redactedResult = redactResult(input.result, secrets);
 
   return {
     id: `aud_${randomUUID()}`,
@@ -64,20 +69,24 @@ function mandateIdFrom(input: unknown): string | undefined {
   }
 
   const mandate = input.mandate;
-  return isRecord(mandate) && typeof mandate.id === "string" ? mandate.id : undefined;
+  if (isRecord(mandate) && typeof mandate.id === "string") {
+    return mandate.id;
+  }
+
+  return typeof input.mandate_id === "string" ? input.mandate_id : undefined;
 }
 
-function redactResult<T>(result: AdapterResult<T>): unknown {
+function redactResult<T>(result: AdapterResult<T>, secrets: ReadonlySet<string>): unknown {
   if (result.ok) {
     return {
       ok: true,
-      value: redact(result.value)
+      value: redact(result.value, secrets)
     };
   }
 
   return {
     ok: false,
-    problem: redactProblem(result.problem)
+    problem: redactProblem(result.problem, secrets)
   };
 }
 
@@ -86,14 +95,44 @@ function redactResult<T>(result: AdapterResult<T>): unknown {
 // generic redactor blanks every key named "code" because VerificationVerifyInput
 // carries the raw OTP under that exact key; here we know the key is the enum and
 // restore it. message/retryable still flow through the generic redactor.
-function redactProblem(problem: Problem): unknown {
-  const redacted = redact(problem);
-  return isRecord(redacted) ? { ...redacted, code: problem.code } : redacted;
+function redactProblem(problem: Problem, secrets: ReadonlySet<string>): unknown {
+  const redacted = redact(problem, secrets);
+  if (!isRecord(redacted)) {
+    return redacted;
+  }
+
+  return {
+    ...redacted,
+    code: problem.code,
+    message:
+      typeof problem.message === "string" ? redactSensitiveText(problem.message, secrets) : redacted.message
+  };
 }
 
-function redact(value: unknown): unknown {
+const REDACTED = "[redacted]";
+const SENSITIVE_KEYS = new Set([
+  "phone",
+  "email",
+  "given_name",
+  "givenName",
+  "family_name",
+  "familyName",
+  "display_name",
+  "displayName",
+  "verification_code",
+  "provider_image_url",
+  "code",
+  "token",
+  "approval_token"
+]);
+
+function redact(value: unknown, secrets: ReadonlySet<string>): unknown {
+  if (typeof value === "string") {
+    return redactSensitiveText(value, secrets);
+  }
+
   if (Array.isArray(value)) {
-    return value.map(redact);
+    return value.map((entry) => redact(entry, secrets));
   }
 
   if (!isRecord(value)) {
@@ -102,13 +141,50 @@ function redact(value: unknown): unknown {
 
   return Object.fromEntries(
     Object.entries(value).map(([key, entry]) => {
-      if (["phone", "email", "verification_code", "code"].includes(key)) {
-        return [key, "[redacted]"];
+      if (SENSITIVE_KEYS.has(key)) {
+        return [key, REDACTED];
       }
 
-      return [key, redact(entry)];
+      return [key, redact(entry, secrets)];
     })
   );
+}
+
+function collectSensitiveStrings(value: unknown, result = new Set<string>()): Set<string> {
+  if (Array.isArray(value)) {
+    for (const entry of value) {
+      collectSensitiveStrings(entry, result);
+    }
+    return result;
+  }
+
+  if (!isRecord(value)) {
+    return result;
+  }
+
+  for (const [key, entry] of Object.entries(value)) {
+    if (SENSITIVE_KEYS.has(key) && typeof entry === "string" && entry.length > 0) {
+      result.add(entry);
+    }
+    collectSensitiveStrings(entry, result);
+  }
+  return result;
+}
+
+function redactSensitiveText(value: string, secrets: ReadonlySet<string>): string {
+  let redacted = value
+    .replace(/approval\.token="[^"]*"/g, `approval.token="${REDACTED}"`)
+    .replace(/[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}/gi, REDACTED)
+    .replace(/\+?\d[\d\s().-]{5,}\d/g, (match) => {
+      const digits = match.replace(/\D/g, "");
+      const phoneish = match.trim().startsWith("+") || digits.length >= 10 || /[()]/.test(match);
+      return digits.length >= 7 && phoneish ? REDACTED : match;
+    });
+
+  for (const secret of secrets) {
+    redacted = redacted.split(secret).join(REDACTED);
+  }
+  return redacted;
 }
 
 function hashJson(value: unknown): string {

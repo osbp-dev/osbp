@@ -35,9 +35,9 @@ VS Code reads MCP servers from `.vscode/mcp.json`. `.vscode/` is gitignored in t
   "servers": {
 
     // OSBP MCP server, Openings adapter (v0.1.0)
-    // Exposes the eight OSBP booking tools backed by a real Openings salon.
-    // Platform: https://openings.link | Setup: examples/v0.1.0/openings/getting-started.md
-    "osbp-openings-v0.1.0": {
+    // Exposes the eight OSBP booking tools backed by a configured Openings business.
+    // Platform: https://openings.link | Setup: integrations/v0.1.0/openings/getting-started.md
+    "osbp-openings": {
       "type": "stdio",
       "command": "node",
       "args": ["packages/osbp-mcp-server/dist/server.js"]

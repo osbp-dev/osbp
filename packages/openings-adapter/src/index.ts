@@ -11,6 +11,7 @@ import type {
   LocationSchedule,
   Money,
   OperatingHours,
+  PendingApproval,
   PlatformIdentity,
   Policy,
   PolicyExplainInput,
@@ -25,42 +26,68 @@ import type {
   VerificationVerifyInput
 } from "@osbp/core";
 import { createHash, randomUUID } from "node:crypto";
-import { mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import { mkdirSync, readFileSync, renameSync, writeFileSync } from "node:fs";
 import { dirname, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
-import { OSBP_VERSION, validateMandate } from "@osbp/core";
+import { OSBP_VERSION, requireApproval, validateMandate } from "@osbp/core";
 
 // Single source token, reused for the X-OSBP-Source header and the appointment
 // metadata written on create. Keep these in sync by construction.
 const OSBP_SOURCE = `openings-adapter/${OSBP_VERSION}`;
 
 export interface OpeningsAdapterConfig {
-  apiBaseUrl: string;
-  salonSlug: string;
+  apiBaseUrl?: string;
+  salonSlug?: string;
   salonId?: string;
   scheduleIds: string[];
   providerUserIds: string[];
   serviceIds: string[];
+  enableCustomerFallback?: boolean;
+  customerId?: string;
+  customerPhone?: string;
+  /** @deprecated Use enableCustomerFallback. */
+  enableTestCustomerFallback?: boolean;
+  /** @deprecated Use customerId. */
   testCustomerId?: string;
+  /** @deprecated Use customerPhone. */
   testCustomerPhone?: string;
+  sendNotifications?: boolean;
+  httpTimeoutMs?: number;
+  bearerToken?: string;
+  apiKey?: string;
+  openingsVersion?: string;
   idempotencyStorePath?: string;
 }
-
-const APPROVAL_TOKEN_TTL_MS = 10 * 60 * 1000;
 
 export function loadOpeningsConfigFromEnv(
   env: Record<string, string | undefined>
 ): OpeningsAdapterConfig {
+  const enableCustomerFallback =
+    parseEnvBoolean(env.OPENINGS_ENABLE_CUSTOMER_FALLBACK) ??
+    parseEnvBoolean(env.OPENINGS_ENABLE_TEST_CUSTOMER_FALLBACK) ??
+    false;
+  const customerId = envString(env.OPENINGS_CUSTOMER_ID) ?? envString(env.OPENINGS_TEST_CUSTOMER_ID);
+  const customerPhone = envString(env.OPENINGS_CUSTOMER_PHONE) ?? envString(env.OPENINGS_TEST_CUSTOMER_PHONE);
+
   return {
-    apiBaseUrl: env.OPENINGS_API_BASE_URL ?? "https://api.openings.link",
-    salonSlug: env.OPENINGS_SALON_SLUG ?? "demo",
-    salonId: env.OPENINGS_SALON_ID,
+    apiBaseUrl: envString(env.OPENINGS_API_BASE_URL),
+    salonSlug: envString(env.OPENINGS_SALON_SLUG),
+    salonId: envString(env.OPENINGS_SALON_ID),
     scheduleIds: splitEnvList(env.OPENINGS_SCHEDULE_IDS),
     providerUserIds: splitEnvList(env.OPENINGS_STAFF_USER_IDS),
     serviceIds: splitEnvList(env.OPENINGS_SERVICE_IDS),
-    testCustomerId: env.OPENINGS_TEST_CUSTOMER_ID,
-    testCustomerPhone: env.OPENINGS_TEST_CUSTOMER_PHONE,
-    idempotencyStorePath: env.OSBP_IDEMPOTENCY_STORE_PATH
+    enableCustomerFallback,
+    customerId,
+    customerPhone,
+    enableTestCustomerFallback: enableCustomerFallback,
+    testCustomerId: customerId,
+    testCustomerPhone: customerPhone,
+    sendNotifications: parseEnvBoolean(env.OPENINGS_SEND_NOTIFICATIONS),
+    httpTimeoutMs: parsePositiveInteger(env.OPENINGS_HTTP_TIMEOUT_MS),
+    bearerToken: envString(env.OPENINGS_BEARER_TOKEN),
+    apiKey: envString(env.OPENINGS_API_KEY),
+    openingsVersion: envString(env.OPENINGS_VERSION) ?? envString(env.OPENINGS_API_VERSION),
+    idempotencyStorePath: envString(env.OSBP_IDEMPOTENCY_STORE_PATH)
   };
 }
 
@@ -96,7 +123,7 @@ function parseEnvFile(path: string): Record<string, string> {
  * precedence, so a single root `.env.local` can hold every adapter's secrets,
  * namespaced by prefix (OPENINGS_*, and future <ADAPTER>_*):
  *
- *   1. <repoRoot>/examples/v0.1.0/openings/.env.local  (public-example fallback)
+ *   1. <repoRoot>/integrations/v0.1.0/openings/.env.local  (public integration fallback)
  *   2. <repoRoot>/.env.local                            (consolidated local file; WINS)
  *
  * Callers layer process.env on top, which wins over both:
@@ -107,7 +134,7 @@ function parseEnvFile(path: string): Record<string, string> {
  */
 export function loadOsbpEnv(repoRoot: string = ADAPTER_REPO_ROOT): Record<string, string> {
   return {
-    ...parseEnvFile(resolve(repoRoot, "examples/v0.1.0/openings/.env.local")),
+    ...parseEnvFile(resolve(repoRoot, "integrations/v0.1.0/openings/.env.local")),
     ...parseEnvFile(resolve(repoRoot, ".env.local"))
   };
 }
@@ -165,15 +192,24 @@ export class OpeningsAdapter implements BookingAdapter {
   }
 
   private async fetchSalon(): Promise<AdapterResult<OpeningsSalon>> {
+    if (!this.config.salonId && !this.config.salonSlug) {
+      return missingConfig("OPENINGS_SALON_ID or OPENINGS_SALON_SLUG");
+    }
+
     try {
       if (this.config.salonId) {
         return ok(mapSalon(await this.getJson<unknown>(`/v1/salons/${this.config.salonId}`), this.config.salonId));
       }
 
+      const salonSlug = this.config.salonSlug;
+      if (!salonSlug) {
+        return missingConfig("OPENINGS_SALON_ID or OPENINGS_SALON_SLUG");
+      }
+
       return ok(
         mapSalon(
           await this.getJson<unknown>("/v1/salons/by-slug", {
-            slug: this.config.salonSlug
+            slug: salonSlug
           }),
           this.config.salonId
         )
@@ -233,6 +269,9 @@ export class OpeningsAdapter implements BookingAdapter {
     // the salon record, not on individual services, so describeService alone
     // cannot build a Money without this extra GET.
     const salon = await this.resolveSalon();
+    if (!salon.ok && salon.problem.code === "missing_config") {
+      return salon;
+    }
     const salonCurrency = salon.ok ? salon.value.currency : undefined;
 
     try {
@@ -266,6 +305,9 @@ export class OpeningsAdapter implements BookingAdapter {
     // through policy.explain. Salon currency powers Slot.price (amount_minor +
     // currency) so the agent can show a price without doing the conversion itself.
     const salon = await this.resolveSalon();
+    if (!salon.ok && salon.problem.code === "missing_config") {
+      return salon;
+    }
     const salonId = salon.ok ? salon.value.id : undefined;
     const salonName = salon.ok ? (salon.value.name ?? salon.value.slug) : undefined;
     const salonCurrency = salon.ok ? salon.value.currency : undefined;
@@ -322,16 +364,23 @@ export class OpeningsAdapter implements BookingAdapter {
 
   async sendVerification(input: VerificationSendInput): Promise<AdapterResult<VerificationChallenge>> {
     const customer = input.customer ?? {};
-    const phone = customer.phone ?? this.config.testCustomerPhone;
+    const phone = customer.phone ?? (customer.email ? undefined : this.customerPhoneFallback());
+
+    let purpose: AdapterResult<string>;
+    try {
+      // requireSalonId throws when OPENINGS_SALON_ID is unset; keep it mapped
+      // into the adapter result path, never a rejected promise.
+      purpose = requireBookingVerificationPurpose(input.purpose, this.requireSalonId());
+    } catch (error) {
+      return problemFromError("openings_verification_send_failed", error);
+    }
+    if (!purpose.ok) return purpose;
 
     if (!phone && !customer.email) {
-      return missingConfig("OPENINGS_TEST_CUSTOMER_PHONE or customer.email");
+      return missingConfig("customer.phone, customer.email, or OPENINGS_ENABLE_CUSTOMER_FALLBACK=true with OPENINGS_CUSTOMER_PHONE");
     }
 
     try {
-      // requireSalonId throws when OPENINGS_SALON_ID is unset; keep it inside
-      // the try so it surfaces as a Problem, never a rejected promise.
-      const purpose = input.purpose ?? `booking:${this.requireSalonId()}`;
       // Openings expects phoneNumber / email at the top level of the body, not
       // nested under a "customer" key. For cancel purposes the phone is resolved
       // from the appointment so the field is optional; for booking purposes it is
@@ -340,13 +389,13 @@ export class OpeningsAdapter implements BookingAdapter {
       await this.postJson<unknown>("/v1/verifications/send", {
         phoneNumber: phone,
         email: customer.email,
-        purpose
+        purpose: purpose.value
       });
 
       return ok({
         sent: true,
         method: phone ? "sms" : "email",
-        purpose
+        purpose: purpose.value
       });
     } catch (error) {
       return problemFromError("openings_verification_send_failed", error);
@@ -354,34 +403,7 @@ export class OpeningsAdapter implements BookingAdapter {
   }
 
   async verifyCode(input: VerificationVerifyInput): Promise<AdapterResult<VerificationChallenge>> {
-    const customer = input.customer ?? {};
-    const phone = customer.phone ?? this.config.testCustomerPhone;
-
-    if (!phone && !customer.email) {
-      return missingConfig("OPENINGS_TEST_CUSTOMER_PHONE or customer.email");
-    }
-
-    try {
-      // requireSalonId throws when OPENINGS_SALON_ID is unset; keep it inside
-      // the try so it surfaces as a Problem, never a rejected promise.
-      const purpose = input.purpose ?? `booking:${this.requireSalonId()}`;
-      await this.postJson<unknown>("/v1/verifications/verify", {
-        customer: {
-          phone,
-          email: customer.email
-        },
-        purpose,
-        code: input.code
-      });
-
-      return ok({
-        verified: true,
-        method: phone ? "sms" : "email",
-        purpose
-      });
-    } catch (error) {
-      return problemFromError("openings_verification_verify_failed", error);
-    }
+    return unsupportedOpeningsVerify(input.purpose);
   }
 
   async createBooking(input: BookingCreateInput): Promise<AdapterResult<Receipt>> {
@@ -392,7 +414,7 @@ export class OpeningsAdapter implements BookingAdapter {
     const payloadHash = stableHash(redactTransientCreateFields(input));
     const cached = this.idempotencyCache.get(input.idempotency_key);
     if (cached) {
-      return cached.payloadHash === payloadHash ? cached.result : idempotencyConflict();
+      return cached.payloadHash === payloadHash ? localCacheReplay(cached.result) : idempotencyConflict();
     }
 
     // Reserve the key before the network call. No await separates the cache
@@ -412,40 +434,67 @@ export class OpeningsAdapter implements BookingAdapter {
   }
 
   // Resolve a customer ID for booking. Preference order:
-  // 1. Explicit id on the input or the configured fixture.
-  // 2. POST /v1/customers/booking (create-or-find, idempotent on salonId+phone).
+  // 1. Explicit id on the input, or the configured fallback only when the input
+  //    carries no contact.
+  // 2. POST /v1/customers/booking (create-or-find, idempotent on salonId+phone/email).
   // 3. History probe fallback (returns a customer id).
   private async resolveCustomerId(
     customer: BookingCreateInput["customer"]
   ): Promise<AdapterResult<string>> {
-    const explicit = customer?.id ?? this.config.testCustomerId;
+    const email = customer?.email;
+    const hasExplicitContact = Boolean(customer?.phone || email);
+    const explicit = customer?.id ?? (hasExplicitContact ? undefined : this.customerIdFallback());
     if (explicit) return ok(explicit);
 
-    const phone = customer?.phone ?? this.config.testCustomerPhone;
-    if (!phone) return missingConfig("OPENINGS_TEST_CUSTOMER_ID or customer.id");
+    // The configured phone is a fallback for inputs that carry no contact at
+    // all. Never blend it with an explicit email: /v1/customers/booking is
+    // idempotent on (salonId, phoneNumber|email), so a fallback phone sent
+    // beside the input's email can resolve a different customer than the one
+    // the input identifies, and the appointment would be created for the
+    // wrong customerId.
+    const phone = customer?.phone ?? (email ? undefined : this.customerPhoneFallback());
+    if (!phone && !email) {
+      return missingConfig("customer.id, customer.phone, customer.email, or OPENINGS_ENABLE_CUSTOMER_FALLBACK=true with OPENINGS_CUSTOMER_ID/OPENINGS_CUSTOMER_PHONE");
+    }
 
     const salonId = this.requireSalonId();
     const userId = this.config.providerUserIds[0];
+    let customerBookingFailure: AdapterResult<string> | undefined;
 
     if (userId) {
+      const name = customerNameParts(customer);
+      if (!name) {
+        return missingConfig("customer.given_name and customer.family_name, or a display_name with first and last name");
+      }
+
       try {
-        // POST /v1/customers/booking is create-or-find, idempotent on (salonId,
-        // phoneNumber). For a customer who already exists, firstName/lastName are
-        // not used to create a new record. The v0.1.0 flow only supports
-        // pre-registered customers on this path.
+        // Openings requires firstName and lastName even for existing-customer
+        // lookups. Do not invent those values: many names are not safely
+        // splittable (for example Chinese names without spaces), and these
+        // fields may be written into the merchant CRM.
         const response = await this.postJson<unknown>("/v1/customers/booking", {
           salonId,
           userId,
           phoneNumber: phone,
-          firstName: "Alex",
-          lastName: "Smith"
+          email,
+          firstName: name.firstName,
+          lastName: name.lastName
         });
-        const record = unwrapRecord(response as unknown as JsonRecord, ["data", "customer"]);
+        const record = unwrapRecord(response as unknown as JsonRecord, ["data"]);
         const customerId = stringField(record, "customerId");
         if (customerId) return ok(customerId);
-      } catch {
-        // Fall through to history probe.
+      } catch (error) {
+        customerBookingFailure = problemFromError("openings_customer_booking_failed", error);
+        if (!phone) return customerBookingFailure;
+        // Fall through to history probe. If the probe also fails, the catch
+        // below prefers this failure over the probe's; if the probe succeeds,
+        // this failure is discarded but not silent: requestJson already wrote
+        // it to stderr as `upstream_error ...` at the throw site above.
       }
+    }
+
+    if (!phone) {
+      return customerBookingFailure ?? missingConfig("OPENINGS_STAFF_USER_IDS, customer.id, or OPENINGS_ENABLE_CUSTOMER_FALLBACK=true with OPENINGS_CUSTOMER_ID");
     }
 
     try {
@@ -456,9 +505,9 @@ export class OpeningsAdapter implements BookingAdapter {
       const probe = unwrapRecord(response as unknown as JsonRecord, ["data"]);
       const customerId = stringField(probe, "customerId");
       if (customerId) return ok(customerId);
-      return missingConfig("OPENINGS_TEST_CUSTOMER_ID or customer.id");
-    } catch {
-      return missingConfig("OPENINGS_TEST_CUSTOMER_ID or customer.id");
+      return customerBookingFailure ?? missingConfig("customer.given_name and customer.family_name, or a display_name with first and last name");
+    } catch (error) {
+      return customerBookingFailure ?? problemFromError("openings_customer_history_failed", error);
     }
   }
 
@@ -514,9 +563,9 @@ export class OpeningsAdapter implements BookingAdapter {
 
       // Adapter-side confirmation lives after mandate validation and before
       // any upstream customer resolution or appointment write. The point is to
-      // force the fully resolved service, slot, price, and policy into an exact
-      // user-visible summary, so the concrete booking is understood and
-      // authorized by the user before Openings sees a mutation. The token is
+      // force the resolved service, merchant-local time, price, and policy into
+      // a user-visible summary, so the concrete booking is understood and
+      // authorized by the user before Openings sees a create mutation. The token is
       // agent-visible, so this is a v0.1.0 brake until host/server-side human
       // approval can enforce the same boundary out of band.
       const approval = this.requireApproval(input, payloadHash, service.value, slot, policy.value);
@@ -527,8 +576,13 @@ export class OpeningsAdapter implements BookingAdapter {
       const customerId = customerIdResult.value;
 
       try {
-        // Do not send requestId here. Appointment create does not use it for
-        // OSBP idempotency, so dedupe stays local via this.idempotencyCache.
+        // Do NOT send requestId here. On Openings, /v1/appointments/create
+        // treats requestId as the foreign key to a ServiceRequest record (the
+        // consultation/quote workflow's entity), not as an idempotency key.
+        // Sending OSBP's idempotency_key as requestId triggers a
+        // `prisma.serviceRequest.findUnique` that returns null, producing a
+        // 404 "Service request not found" before the booking is even attempted.
+        // OSBP idempotency stays purely local via this.idempotencyCache above.
         const response = await this.postJson<unknown>(
           "/v1/appointments/create",
           {
@@ -540,7 +594,7 @@ export class OpeningsAdapter implements BookingAdapter {
             time: input.time,
             services: [{ id: input.service_id }],
             verificationCode: input.verification_code,
-            sendNotifications: true,
+            sendNotifications: this.config.sendNotifications,
             metadata: buildAppointmentMetadata(input)
           }
         );
@@ -560,35 +614,8 @@ export class OpeningsAdapter implements BookingAdapter {
 
         return result;
       } catch (error) {
-        if (error instanceof OpeningsHttpError && error.status === 428) {
-          // Do NOT interpolate error.body here. A 428 is the verification-required
-          // signal, and its upstream body can echo the customer phone, email, or a
-          // verification code; this message flows to the agent context and the
-          // audit log, where the spec forbids persisting raw verification codes
-          // (architecture.md, Security and Privacy Considerations). The static code
-          // plus retryable flag carry everything the agent needs to drive
-          // verification.send; the raw body is intentionally dropped, matching the
-          // body-out-of-message invariant the OpeningsHttpError constructor documents.
-          return {
-            ok: false,
-            problem: {
-              code: "requires_verification",
-              message: "Openings requires customer verification before booking",
-              retryable: true
-            }
-          };
-        }
-
-        if (error instanceof OpeningsHttpError && isSlotConflict(error)) {
-          return {
-            ok: false,
-            problem: {
-              code: "slot_taken",
-              message: "Openings reported that the selected slot is no longer available",
-              retryable: true
-            }
-          };
-        }
+        const mapped = problemFromCreateError(error);
+        if (mapped) return mapped;
 
         return problemFromError("openings_booking_create_failed", error);
       }
@@ -644,11 +671,11 @@ export class OpeningsAdapter implements BookingAdapter {
       }
     }
 
-    const phone = input.customer?.phone ?? this.config.testCustomerPhone;
     const email = input.customer?.email;
+    const phone = input.customer?.phone ?? (email ? undefined : this.customerPhoneFallback());
 
     if (!phone && !email) {
-      return missingConfig("OPENINGS_TEST_CUSTOMER_PHONE or customer.email");
+      return missingConfig("customer.phone, customer.email, or OPENINGS_ENABLE_CUSTOMER_FALLBACK=true with OPENINGS_CUSTOMER_PHONE");
     }
 
     try {
@@ -711,34 +738,15 @@ export class OpeningsAdapter implements BookingAdapter {
     slot: Slot,
     policy: Policy
   ): AdapterResult<BookingApproval> {
-    const now = Date.now();
-    const pending = this.pendingApprovals.get(payloadHash);
-    if (pending && pending.expiresAt > now && input.approval?.confirmed === true && input.approval.token === pending.token) {
-      return ok(input.approval);
-    }
-
-    if (pending && pending.expiresAt <= now) {
-      this.pendingApprovals.delete(payloadHash);
-    }
-
-    const active = this.pendingApprovals.get(payloadHash) ?? {
-      token: randomUUID(),
+    const approvalGate = requireApproval({
+      approval: input.approval,
+      payloadHash,
       summary: bookingApprovalSummary(input, service, slot, policy),
-      expiresAt: now + APPROVAL_TOKEN_TTL_MS
-    };
-    this.pendingApprovals.set(payloadHash, active);
-
-    return {
-      ok: false,
-      problem: {
-        code: "requires_user_confirmation",
-        message:
-          "Final user approval is required before booking. Show this exact summary to the user: " +
-          `${active.summary} If the user approves, retry booking.create with ` +
-          `approval.confirmed=true and approval.token=${JSON.stringify(active.token)}.`,
-        retryable: true
-      }
-    };
+      store: this.pendingApprovals,
+      now: Date.now(),
+      newToken: randomUUID
+    });
+    return approvalGate.ok ? ok(approvalGate.approval) : approvalGate;
   }
 
   private requireSalonId(): string {
@@ -749,8 +757,20 @@ export class OpeningsAdapter implements BookingAdapter {
     return this.config.salonId;
   }
 
+  private customerIdFallback(): string | undefined {
+    return this.customerFallbackEnabled() ? this.config.customerId ?? this.config.testCustomerId : undefined;
+  }
+
+  private customerPhoneFallback(): string | undefined {
+    return this.customerFallbackEnabled() ? this.config.customerPhone ?? this.config.testCustomerPhone : undefined;
+  }
+
+  private customerFallbackEnabled(): boolean {
+    return this.config.enableCustomerFallback ?? this.config.enableTestCustomerFallback ?? false;
+  }
+
   private async getJson<T>(path: string, query: Record<string, string> = {}): Promise<T> {
-    const url = new URL(path, withTrailingSlash(this.config.apiBaseUrl));
+    const url = new URL(path, withTrailingSlash(this.requireApiBaseUrl()));
     for (const [key, value] of Object.entries(query)) {
       url.searchParams.set(key, value);
     }
@@ -765,7 +785,7 @@ export class OpeningsAdapter implements BookingAdapter {
     body: unknown,
     headers: Record<string, string> = {}
   ): Promise<T> {
-    const url = new URL(path, withTrailingSlash(this.config.apiBaseUrl));
+    const url = new URL(path, withTrailingSlash(this.requireApiBaseUrl()));
     return this.requestJson<T>(url, {
       method: "POST",
       body: JSON.stringify(dropUndefined(body)),
@@ -782,16 +802,35 @@ export class OpeningsAdapter implements BookingAdapter {
     // X-OSBP-Source mirrors the adapter token for structured log filtering without UA parsing.
     // No URL appended: OSBP is a library; the deployer — not osbp.dev — is responsible for requests.
     // See AGENTS.md "HTTP Adapter Identity" for the full convention and debugging workflow.
-    const response = await fetch(url, {
-      ...init,
-      headers: {
-        accept: "application/json",
-        "content-type": "application/json",
-        "user-agent": `OSBP/${OSBP_VERSION} openings-adapter/${OSBP_VERSION} node/${process.versions.node.split(".")[0]}`,
-        "x-osbp-source": OSBP_SOURCE,
-        ...init.headers
+    const controller = this.config.httpTimeoutMs ? new AbortController() : undefined;
+    const timeout = controller
+      ? setTimeout(() => controller.abort(), this.config.httpTimeoutMs)
+      : undefined;
+
+    let response: Response;
+    try {
+      response = await fetch(url, {
+        ...init,
+        signal: controller?.signal ?? init.signal,
+        headers: {
+          accept: "application/json",
+          "content-type": "application/json",
+          "user-agent": `OSBP/${OSBP_VERSION} openings-adapter/${OSBP_VERSION} node/${process.versions.node.split(".")[0]}`,
+          "x-osbp-source": OSBP_SOURCE,
+          ...this.openingsRequestHeaders(),
+          ...init.headers
+        }
+      });
+    } catch (error) {
+      if (controller?.signal.aborted) {
+        throw new OpeningsError(`Openings request timed out after ${this.config.httpTimeoutMs}ms`);
       }
-    });
+      throw error;
+    } finally {
+      if (timeout) {
+        clearTimeout(timeout);
+      }
+    }
 
     const meta = captureUpstreamMeta(
       `${(init.method ?? "GET").toUpperCase()} ${redactPathSegments(url.pathname)}`,
@@ -808,11 +847,36 @@ export class OpeningsAdapter implements BookingAdapter {
       // audit log. 4xx bodies carry validation/business detail (e.g. 422
       // validation, 428 verification) that is no longer surfaced through
       // Problem.message, so they are logged here too for operator debugging.
-      console.error(`[openings-adapter] upstream_error ${response.status} ${redactedPath} ${body.slice(0, 240)}`);
+      console.error(
+        `[openings-adapter] upstream_error ${response.status} ${redactedPath} ${redactDiagnosticText(body).slice(0, 240)}`
+      );
       throw new OpeningsHttpError(response.status, response.statusText, redactedPath, body);
     }
 
     return (await response.json()) as T;
+  }
+
+  private requireApiBaseUrl(): string {
+    const apiBaseUrl = this.config.apiBaseUrl?.trim();
+    if (!apiBaseUrl) {
+      throw new OpeningsMissingConfigError("OPENINGS_API_BASE_URL");
+    }
+
+    return apiBaseUrl;
+  }
+
+  private openingsRequestHeaders(): Record<string, string> {
+    const headers: Record<string, string> = {};
+    if (this.config.bearerToken) {
+      headers.authorization = `Bearer ${this.config.bearerToken}`;
+    }
+    if (this.config.apiKey) {
+      headers["x-api-key"] = this.config.apiKey;
+    }
+    if (this.config.openingsVersion) {
+      headers["openings-version"] = this.config.openingsVersion;
+    }
+    return headers;
   }
 
   // RFC 9745 (Deprecation) and RFC 8594 (Sunset) announce that an upstream
@@ -842,12 +906,18 @@ export class OpeningsAdapter implements BookingAdapter {
 
   private rememberIdempotentResult(key: string, entry: IdempotencyEntry): void {
     this.idempotencyCache.set(key, entry);
-    saveIdempotencyStore(this.config.idempotencyStorePath, this.idempotencyCache);
+    try {
+      saveIdempotencyStore(this.config.idempotencyStorePath, this.idempotencyCache);
+    } catch (error) {
+      console.warn(
+        `[openings-adapter] idempotency persistence failed; same-process replay remains available (${idempotencyPersistenceFailureReason(error)})`
+      );
+    }
   }
 }
 
 export interface ReadOnlySmokeResult {
-  salon: OpeningsSalon;
+  organization: OpeningsSalon;
   locations: LocationSchedule[];
   services: Service[];
   service: Service;
@@ -887,7 +957,7 @@ export async function runReadOnlySmoke(adapter: OpeningsAdapter): Promise<Adapte
     return {
       ok: false,
       problem: {
-        code: "missing_smoke_fixture",
+        code: "missing_smoke_target",
         message: "Read-only smoke needs at least one service id and one schedule id",
         retryable: false
       }
@@ -909,9 +979,9 @@ export async function runReadOnlySmoke(adapter: OpeningsAdapter): Promise<Adapte
     return mandateReachability;
   }
 
-  const bookableFixture = checkHappyPathFixtureSupported(service.value, policy.value);
-  if (!bookableFixture.ok) {
-    return bookableFixture;
+  const bookableTarget = checkHappyPathTargetSupported(service.value, policy.value);
+  if (!bookableTarget.ok) {
+    return bookableTarget;
   }
 
   const policyShape = checkPolicyOrganizationCanaryShape(policy.value);
@@ -955,7 +1025,7 @@ export async function runReadOnlySmoke(adapter: OpeningsAdapter): Promise<Adapte
   }
 
   return ok({
-    salon: salon.value,
+    organization: salon.value,
     locations: locations.value,
     services: services.value,
     service: service.value,
@@ -1007,15 +1077,15 @@ function checkMandateReachability(service: Service, policy: Policy): AdapterResu
   });
 }
 
-function checkHappyPathFixtureSupported(service: Service, policy: Policy): AdapterResult<SmokeCheck> {
+function checkHappyPathTargetSupported(service: Service, policy: Policy): AdapterResult<SmokeCheck> {
   if (service.requires_consultation === true) {
     return {
       ok: false,
       problem: {
-        code: "unsupported_smoke_bookability_fixture",
+        code: "unsupported_smoke_bookability_target",
         message:
           "Happy-path smoke requires a v0.1.0-bookable service, but the configured service has requires_consultation=true; " +
-          "choose a non-consultation fixture instead of treating this as a mandate reachability failure",
+          "choose a non-consultation smoke target instead of treating this as a mandate reachability failure",
         retryable: false
       }
     };
@@ -1025,10 +1095,10 @@ function checkHappyPathFixtureSupported(service: Service, policy: Policy): Adapt
     return {
       ok: false,
       problem: {
-        code: "unsupported_smoke_bookability_fixture",
+        code: "unsupported_smoke_bookability_target",
         message:
-          `Happy-path smoke requires a no-payment v0.1.0 fixture, but policy.explain returned payment_requirement=${policy.payment_requirement}; ` +
-          "choose a no-payment fixture instead of treating this as a mandate reachability failure",
+          `Happy-path smoke requires a no-payment v0.1.0 target, but policy.explain returned payment_requirement=${policy.payment_requirement}; ` +
+          "choose a no-payment smoke target instead of treating this as a mandate reachability failure",
         retryable: false
       }
     };
@@ -1265,9 +1335,11 @@ function buildSmokeMandate(salon: OpeningsSalon, service: Service, slot: Slot): 
     provider_ids: slot.provider_id ? [slot.provider_id] : undefined,
     schedule_ids: [slot.schedule_id],
     // earliest_start / latest_end are wall-clock by contract, so derive them
-    // from the slot's wall-clock fields, not the absolute instant.
+    // from the slot's wall-clock fields, not the absolute instant. Do not
+    // synthesize latest_end from starts_at_local: validateMandate correctly
+    // fails closed when a latest_end cap exists without slot end evidence.
     earliest_start: slot.starts_at_local,
-    latest_end: slot.ends_at_local ?? slot.starts_at_local,
+    latest_end: slot.ends_at_local,
     max_price: maxPrice,
     allow_policy_fee: false,
     max_extra_fee: capCurrency ? { amount_minor: 0, currency: capCurrency } : undefined
@@ -1309,6 +1381,12 @@ class OpeningsError extends Error {
   override name = "OpeningsError";
 }
 
+class OpeningsMissingConfigError extends OpeningsError {
+  constructor(readonly setting: string) {
+    super(`${setting} is required`);
+  }
+}
+
 class OpeningsHttpError extends OpeningsError {
   constructor(
     readonly status: number,
@@ -1337,11 +1415,15 @@ export function captureUpstreamMeta(call: string, response: Response): UpstreamM
   if (server) {
     meta.server = server;
   }
-  // `Openings-Version` is the documented version echo; `api-version` /
-  // `x-api-version` are kept as fallbacks for other platforms.
-  const apiVersion = response.headers.get("openings-version")
-    ?? response.headers.get("api-version")
-    ?? response.headers.get("x-api-version");
+  // Openings echoes the runtime contract version on every response as
+  // `Openings-Version`. Prefer it over the generic
+  // api-version / x-api-version probes OSBP coded defensively before Openings
+  // chose a header name, so the served contract version lands in the neutral
+  // UpstreamMeta.api_version slot and the audit log.
+  const apiVersion =
+    response.headers.get("openings-version") ??
+    response.headers.get("api-version") ??
+    response.headers.get("x-api-version");
   if (apiVersion) {
     meta.api_version = apiVersion;
   }
@@ -1358,7 +1440,7 @@ export function captureUpstreamMeta(call: string, response: Response): UpstreamM
     if (!meta.request_id && name.includes("request-id")) {
       meta.request_id = value;
     }
-    if (name === "ratelimit" || name === "ratelimit-policy" || name.startsWith("x-ratelimit-")) {
+    if (name === "retry-after" || name === "ratelimit" || name === "ratelimit-policy" || name.startsWith("x-ratelimit-")) {
       (meta.ratelimit ??= {})[name] = value;
     }
   }
@@ -1375,12 +1457,32 @@ function redactPathSegments(pathname: string): string {
     .split("/")
     .map((segment) => {
       const decoded = safeDecode(segment);
-      if (/^\+?\d{7,15}$/.test(decoded) || decoded.includes("@")) {
+      const phoneCandidate = decoded.replace(/[\s().-]/g, "");
+      if (/^\+?\d{7,15}$/.test(phoneCandidate) || decoded.includes("@")) {
         return ":redacted";
       }
       return segment;
     })
     .join("/");
+}
+
+function redactDiagnosticText(text: string): string {
+  return text
+    .replace(
+      /\b(code|verification(?:Code| code)?)(["'\s:=]+)\d{4,8}\b/gi,
+      (_match, label: string, separator: string) => `${label}${separator}[redacted]`
+    )
+    .replace(/[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}/gi, "[redacted]")
+    .replace(/\+?\d[\d\s().-]{6,}\d/g, (match) => {
+      const digits = match.replace(/\D/g, "");
+      const trimmed = match.trim();
+      const phoneLike =
+        trimmed.startsWith("+") ||
+        digits.length >= 10 ||
+        /\(\d{3}\)/.test(trimmed) ||
+        /^\d{3}[-.]\d{4}$/.test(trimmed);
+      return phoneLike ? "[redacted]" : match;
+    });
 }
 
 function safeDecode(segment: string): string {
@@ -1402,10 +1504,87 @@ interface InFlightBooking {
   promise: Promise<AdapterResult<Receipt>>;
 }
 
-interface PendingApproval {
-  token: string;
-  summary: string;
-  expiresAt: number;
+export interface OpeningsIdempotencyKeyInspection {
+  configured: boolean;
+  storeExists: boolean;
+  keyPresent: boolean;
+}
+
+export function hasOpeningsIdempotencyKey(path: string | undefined, key: string): boolean {
+  const store = readIdempotencyStoreObject(path);
+  return store ? Object.hasOwn(store, key) : false;
+}
+
+export function inspectOpeningsIdempotencyKey(path: string | undefined, key: string): OpeningsIdempotencyKeyInspection {
+  if (!path) {
+    return { configured: false, storeExists: false, keyPresent: false };
+  }
+
+  const store = readIdempotencyStoreObject(path, { strict: true });
+  return {
+    configured: true,
+    storeExists: Boolean(store),
+    keyPresent: store ? Object.hasOwn(store, key) : false
+  };
+}
+
+export function removeOpeningsIdempotencyKey(path: string | undefined, key: string): boolean {
+  if (!path) {
+    return false;
+  }
+  const store = readIdempotencyStoreObject(path);
+  if (!store || !Object.hasOwn(store, key)) {
+    return false;
+  }
+
+  delete store[key];
+  writeIdempotencyStoreObject(path, store);
+  return true;
+}
+
+function readIdempotencyStoreObject(path: string | undefined, options: { strict?: boolean } = {}): Record<string, unknown> | undefined {
+  if (!path) {
+    return undefined;
+  }
+
+  try {
+    const parsed = JSON.parse(readFileSync(path, "utf8")) as unknown;
+    if (!isRecord(parsed)) {
+      if (options.strict) {
+        throw new Error(`malformed idempotency store ${path}: expected object`);
+      }
+      return undefined;
+    }
+    if (options.strict) {
+      validateIdempotencyStoreObject(path, parsed);
+    }
+    return { ...parsed };
+  } catch (error) {
+    if (isNodeError(error) && error.code === "ENOENT") {
+      return undefined;
+    }
+    if (options.strict) {
+      throw error instanceof Error
+        ? error
+        : new Error(`unreadable idempotency store ${path}`);
+    }
+    return undefined;
+  }
+}
+
+function validateIdempotencyStoreObject(path: string, store: Record<string, unknown>): void {
+  for (const [key, value] of Object.entries(store)) {
+    if (!isIdempotencyEntry(value)) {
+      throw new Error(`malformed idempotency entry ${JSON.stringify(key)} in ${path}`);
+    }
+  }
+}
+
+function writeIdempotencyStoreObject(path: string, store: Record<string, unknown>): void {
+  mkdirSync(dirname(path), { recursive: true, mode: 0o700 });
+  const tmpPath = `${path}.${process.pid}.${Date.now()}.tmp`;
+  writeFileSync(tmpPath, `${JSON.stringify(store, null, 2)}\n`, { mode: 0o600 });
+  renameSync(tmpPath, path);
 }
 
 function loadIdempotencyStore(path: string | undefined): Map<string, IdempotencyEntry> {
@@ -1414,9 +1593,25 @@ function loadIdempotencyStore(path: string | undefined): Map<string, Idempotency
   }
 
   try {
-    const parsed = JSON.parse(readFileSync(path, "utf8")) as Record<string, IdempotencyEntry>;
-    return new Map(Object.entries(parsed));
-  } catch {
+    const parsed = JSON.parse(readFileSync(path, "utf8")) as unknown;
+    if (!isRecord(parsed)) {
+      console.warn(`[openings-adapter] ignoring malformed idempotency store ${path}: expected object`);
+      return new Map();
+    }
+
+    const entries = Object.entries(parsed).filter((entry): entry is [string, IdempotencyEntry] => {
+      const [key, value] = entry;
+      const valid = isIdempotencyEntry(value);
+      if (!valid) {
+        console.warn(`[openings-adapter] ignoring malformed idempotency entry ${JSON.stringify(key)} in ${path}`);
+      }
+      return valid;
+    });
+    return new Map(entries);
+  } catch (error) {
+    if (isNodeError(error) && error.code !== "ENOENT") {
+      console.warn(`[openings-adapter] ignoring unreadable idempotency store ${path}: ${error.message}`);
+    }
     return new Map();
   }
 }
@@ -1431,7 +1626,79 @@ function saveIdempotencyStore(path: string | undefined, entries: Map<string, Ide
   // another local process under a permissive umask cannot read them by default.
   // The mode applies on creation; a pre-existing store keeps its current mode.
   mkdirSync(dirname(path), { recursive: true, mode: 0o700 });
-  writeFileSync(path, `${JSON.stringify(Object.fromEntries(entries), null, 2)}\n`, { mode: 0o600 });
+  const tmpPath = `${path}.${process.pid}.${Date.now()}.tmp`;
+  writeFileSync(tmpPath, `${JSON.stringify(Object.fromEntries(entries), null, 2)}\n`, { mode: 0o600 });
+  renameSync(tmpPath, path);
+}
+
+function idempotencyPersistenceFailureReason(error: unknown): string {
+  if (isNodeError(error) && error.code) {
+    return error.code;
+  }
+  if (error instanceof Error && error.name) {
+    return error.name;
+  }
+  return "unknown";
+}
+
+function localCacheReplay<T>(result: AdapterResult<T>): AdapterResult<T> {
+  return {
+    ...result,
+    osbp_runtime: {
+      ...result.osbp_runtime,
+      idempotency: "local_cache_replay",
+      message: "No Openings create call was made; this result was replayed from local OSBP idempotency state."
+    }
+  };
+}
+
+function isIdempotencyEntry(value: unknown): value is IdempotencyEntry {
+  if (!isRecord(value)) {
+    return false;
+  }
+  return typeof value.payloadHash === "string" &&
+    isAdapterReceiptResult(value.result) &&
+    isRecord(value.booking) &&
+    typeof value.booking.id === "string";
+}
+
+function isAdapterReceiptResult(value: unknown): value is AdapterResult<Receipt> {
+  if (!isRecord(value) || typeof value.ok !== "boolean") {
+    return false;
+  }
+  if (value.ok === true) {
+    return isRecord(value.value) && typeof value.value.id === "string" && typeof value.value.booking_id === "string";
+  }
+  return isRecord(value.problem) && typeof value.problem.code === "string" && typeof value.problem.message === "string";
+}
+
+function isNodeError(error: unknown): error is NodeJS.ErrnoException {
+  return error instanceof Error && "code" in error;
+}
+
+function envString(value: string | undefined): string | undefined {
+  const trimmed = value?.trim();
+  return trimmed ? trimmed : undefined;
+}
+
+function parseEnvBoolean(value: string | undefined): boolean | undefined {
+  const normalized = envString(value)?.toLowerCase();
+  if (normalized === "true") {
+    return true;
+  }
+  if (normalized === "false") {
+    return false;
+  }
+  return undefined;
+}
+
+function parsePositiveInteger(value: string | undefined): number | undefined {
+  const normalized = envString(value);
+  if (!normalized) {
+    return undefined;
+  }
+  const parsed = Number(normalized);
+  return Number.isInteger(parsed) && parsed > 0 ? parsed : undefined;
 }
 
 function splitEnvList(value: string | undefined): string[] {
@@ -1460,12 +1727,180 @@ function missingConfig<T>(name: string): AdapterResult<T> {
   };
 }
 
+function unsupportedVerificationPurpose<T>(purpose: string, expected: string): AdapterResult<T> {
+  return {
+    ok: false,
+    problem: {
+      code: "invalid_verification_purpose",
+      message: `verification purpose ${JSON.stringify(purpose)} is outside OSBP v0.1.0 scope; use ${JSON.stringify(expected)}`,
+      retryable: false
+    }
+  };
+}
+
+function unsupportedOpeningsVerify<T>(purpose: string | undefined): AdapterResult<T> {
+  const describedPurpose = purpose ?? "booking:{salonId}";
+  return {
+    ok: false,
+    problem: {
+      code: "invalid_verification_purpose",
+      message:
+        `verification.verify is not supported by the Openings v0.1.0 adapter for ${JSON.stringify(describedPurpose)}; ` +
+        "pass the raw verification code to booking.create because Openings verification.verify consumes the booking session",
+      retryable: false
+    }
+  };
+}
+
+function requireBookingVerificationPurpose(inputPurpose: string | undefined, salonId: string): AdapterResult<string> {
+  const expected = `booking:${salonId}`;
+  const purpose = inputPurpose ?? expected;
+  return purpose === expected ? ok(purpose) : unsupportedVerificationPurpose(purpose, expected);
+}
+
 function idempotencyConflict(): AdapterResult<Receipt> {
   return {
     ok: false,
     problem: {
       code: "idempotency_conflict",
       message: "idempotency_key was reused with a different booking payload",
+      retryable: false
+    }
+  };
+}
+
+function problemFromCreateError(error: unknown): AdapterResult<Receipt> | undefined {
+  if (!(error instanceof OpeningsHttpError)) {
+    return undefined;
+  }
+
+  // This mapping is intentionally the most commented part of the adapter:
+  // future adapters should translate platform-specific failure details into the
+  // smallest OSBP action the agent can safely take. HTTP status alone is not
+  // enough. Openings uses 429 for both real rate limits and durable booking
+  // blocks, and 409 can mean slot contention today or native idempotency states
+  // once the adapter adopts the upstream Idempotency-Key header.
+  //
+  // We parse the upstream machine code for control flow only. Do not put
+  // error.body in Problem.message: booking and verification errors can echo a
+  // phone number, email address, or raw verification code, and Problem.message
+  // goes to both the agent context and the audit log.
+  switch (openingsErrorCode(error)) {
+    case "VERIFICATION_REQUIRED":
+      return requiresVerificationProblem();
+    case "VERIFICATION_FAILED":
+      return verificationFailedProblem();
+    case "SLOT_CONFLICT":
+      return slotTakenProblem();
+    case "RATE_LIMITED":
+      return rateLimitedProblem();
+    case "BOOKING_BLOCKED":
+      return blockedCreateProblem("openings_booking_blocked", "Openings blocked this booking; stop automated booking and request human handoff");
+    case "CUSTOMER_BLOCKED":
+      return blockedCreateProblem("openings_customer_blocked", "Openings blocked this customer from booking; stop automated booking and request human handoff");
+    case "IDEMPOTENCY_KEY_CONFLICT":
+      // OSBP v0.1.0 still dedupes locally and does not send the native
+      // Idempotency-Key header, but the published Openings contract includes
+      // this response. Keep the mapping here so adopting the native header later
+      // does not accidentally tell the agent the slot was taken.
+      return {
+        ok: false,
+        problem: {
+          code: "idempotency_conflict",
+          message: "Openings reported an idempotency-key conflict; start a fresh booking attempt with a new key",
+          retryable: false
+        }
+      };
+    case "IDEMPOTENCY_KEY_PROCESSING":
+      // There is no protocol-level "same mutation still in flight" problem in
+      // v0.1.0. Use an adapter-specific code and mark it retryable: the safe
+      // action is to retry the exact same payload/key after a short delay, not
+      // to choose a new slot or generate a new logical booking.
+      return {
+        ok: false,
+        problem: {
+          code: "openings_idempotency_processing",
+          message: "Openings is still processing a booking request with this idempotency key; retry the same request shortly",
+          retryable: true
+        }
+      };
+  }
+
+  // Status fallbacks exist for older or degraded responses that do not include
+  // the structured Openings error.code. Keep these narrower than the code-based
+  // mapping above: whenever Openings sends a machine code, the code wins.
+  if (error.status === 428) {
+    return requiresVerificationProblem();
+  }
+  if (error.status === 410) {
+    return verificationFailedProblem();
+  }
+  if (isSlotConflict(error)) {
+    return slotTakenProblem();
+  }
+
+  return undefined;
+}
+
+function openingsErrorCode(error: OpeningsHttpError): string | undefined {
+  try {
+    const parsed = JSON.parse(error.body) as unknown;
+    return stringField(asRecord(asRecord(parsed).error), "code");
+  } catch {
+    return undefined;
+  }
+}
+
+function requiresVerificationProblem(): AdapterResult<Receipt> {
+  return {
+    ok: false,
+    problem: {
+      code: "requires_verification",
+      message: "Openings requires customer verification before booking",
+      retryable: true
+    }
+  };
+}
+
+function verificationFailedProblem(): AdapterResult<Receipt> {
+  return {
+    ok: false,
+    problem: {
+      code: "verification_failed",
+      message: "Openings rejected the verification code; request a new code and retry booking.create",
+      retryable: true
+    }
+  };
+}
+
+function slotTakenProblem(): AdapterResult<Receipt> {
+  return {
+    ok: false,
+    problem: {
+      code: "slot_taken",
+      message: "Openings reported that the selected slot is no longer available",
+      retryable: true
+    }
+  };
+}
+
+function rateLimitedProblem(): AdapterResult<Receipt> {
+  return {
+    ok: false,
+    problem: {
+      code: "rate_limited",
+      message: "Openings rate-limited the booking request; back off and retry",
+      retryable: true
+    }
+  };
+}
+
+function blockedCreateProblem(code: string, message: string): AdapterResult<Receipt> {
+  return {
+    ok: false,
+    problem: {
+      code,
+      message,
       retryable: false
     }
   };
@@ -1484,6 +1919,10 @@ function buildAppointmentMetadata(input: BookingCreateInput): Record<string, str
 }
 
 function problemFromError<T>(code: string, error: unknown): AdapterResult<T> {
+  if (error instanceof OpeningsMissingConfigError) {
+    return missingConfig(error.setting);
+  }
+
   if (error instanceof OpeningsHttpError) {
     return {
       ok: false,
@@ -1774,10 +2213,13 @@ function mapReviewBooking(value: unknown, fallbackId: string): Booking {
 
   const date = stringField(record, "date");
   const time = stringField(record, "time");
+  const startsAtLocalField = stringField(record, "startsAtLocal");
   const startsAtLocal =
     date && time
       ? `${date}T${time.length === 5 ? `${time}:00` : time}`
-      : stringField(record, "startsAtLocal") ?? stringField(record, "startsAt");
+      : startsAtLocalField && !hasExplicitOffset(startsAtLocalField)
+        ? startsAtLocalField
+        : undefined;
 
   const rawStatus = stringField(record, "status");
 
@@ -1800,6 +2242,10 @@ function mapReviewBooking(value: unknown, fallbackId: string): Booking {
     starts_at_local: startsAtLocal,
     customer_id: stringField(record, "customerId") ?? stringField(customer, "id")
   }) as Booking;
+}
+
+function hasExplicitOffset(value: string): boolean {
+  return /Z$/i.test(value) || /[+-]\d{2}:?\d{2}$/.test(value);
 }
 
 function extractSlots(
@@ -1856,7 +2302,7 @@ function extractSlots(
     // schedule_timezone authoritative for starts_at_local and schedule_hours,
     // and the tz used to derive the absolute instant starts_at.
     // Prefer the location's own tz; fall back to the salon's configured tz so
-    // single-location demo salons (where /v1/locations may omit the field) still
+    // single-location businesses (where /v1/locations may omit the field) still
     // surface a usable IANA name. Without this, agents have to round-trip
     // through policy.explain to interpret slot times.
     const scheduleTimezone = locationFallback?.timezone ?? input.organization_timezone;
@@ -2096,7 +2542,7 @@ function openingsDayToIso8601(day: number): number {
 // enum. The platform is the system of record for the status, so the adapter
 // normalizes whatever it sends; an unrecognized status becomes "unknown". An
 // absent status on a create response reads as "booked", since the appointment
-// was accepted and no narrower state was supplied.
+// was just created (this preserves the prior "confirmed" default behavior).
 function normalizeBookingStatus(raw: string | undefined): BookingStatus {
   switch (raw?.toLowerCase()) {
     case "booked":
@@ -2127,14 +2573,38 @@ function normalizeBookingStatus(raw: string | undefined): BookingStatus {
 
 // ISO 4217 minor-unit exponents that differ from the default of 2. The
 // exponent VARIES by currency: most use 2 (USD, EUR), some use 0 (JPY, KRW),
-// and a few use 3 (KWD, BHD, OMR). Extend this map as new merchant currencies
-// appear; anything not listed scales by 10^2.
+// some use 3 (KWD, BHD, OMR), and a small number of fund-style codes use 4.
+// Snapshot reviewed against ISO 4217 / CLDR on 2026-07-07; recheck before
+// changing this table or onboarding a new merchant currency.
+// Keep this list current with ISO 4217/CLDR rather than adding one-off
+// currencies as merchants appear.
 const CURRENCY_MINOR_UNIT_EXPONENT: Record<string, number> = {
+  BIF: 0,
+  CLP: 0,
+  DJF: 0,
+  GNF: 0,
+  ISK: 0,
   JPY: 0,
+  KMF: 0,
   KRW: 0,
-  KWD: 3,
+  PYG: 0,
+  RWF: 0,
+  UGX: 0,
+  UYI: 0,
+  VND: 0,
+  VUV: 0,
+  XAF: 0,
+  XOF: 0,
+  XPF: 0,
   BHD: 3,
-  OMR: 3
+  IQD: 3,
+  JOD: 3,
+  KWD: 3,
+  LYD: 3,
+  OMR: 3,
+  TND: 3,
+  CLF: 4,
+  UYW: 4
 };
 
 function minorUnitExponent(currency: string | undefined): number {
@@ -2149,8 +2619,9 @@ function minorUnitExponent(currency: string | undefined): number {
 // exponent. COPY HAZARD: two traps live here. First, do not reuse this for
 // platforms whose money fields are already minor units (Square or Stripe-style
 // amounts), pass those through unscaled, or you get 100x prices. Second, the
-// minor-unit exponent is NOT always 2 (cents): JPY uses 0, KWD and BHD use 3,
-// so the scale factor depends on the currency, not a fixed *100.
+// minor-unit exponent is NOT always 2 (cents): CLP and JPY use 0, JOD and
+// KWD use 3, and CLF uses 4, so the scale factor depends on the currency, not
+// a fixed *100.
 function toMinorUnits(record: JsonRecord, key: string, currency: string | undefined): number | undefined {
   const value = numberField(record, key);
   if (value === undefined) {
@@ -2201,14 +2672,17 @@ function formatMoney(amountMinor: number | undefined, currency: string | undefin
   // display is a non-canonical presentation hint; the canonical value is
   // amount_minor + currency, which agents SHOULD reformat in the end user's
   // locale. Openings exposes no locale or language on the salon/organization
-  // record, so pass undefined and let Intl.NumberFormat use the runtime default
-  // rather than constructing `en-<COUNTRY>`, which is anglocentric (a French
-  // merchant is not "en-FR") and forces English grouping/symbol placement onto
-  // every merchant. If a locale/language field is added upstream, thread it
-  // here instead of undefined.
-  const locale = undefined;
+  // record, so pin a deterministic English display hint until a real merchant
+  // locale exists rather than letting the host's LANG/ICU environment leak
+  // into the wire.
+  const locale = "en-US";
   try {
-    return new Intl.NumberFormat(locale, { style: "currency", currency: currency.toUpperCase() }).format(major);
+    return new Intl.NumberFormat(locale, {
+      style: "currency",
+      currency: currency.toUpperCase(),
+      minimumFractionDigits: exponent,
+      maximumFractionDigits: exponent
+    }).format(major);
   } catch {
     // Intl throws on unknown currency codes. Fall back to a plain numeric
     // string with the currency code suffix so the agent still has something
@@ -2220,6 +2694,20 @@ function formatMoney(amountMinor: number | undefined, currency: string | undefin
 function joinNameParts(first?: string, last?: string): string | undefined {
   const joined = [first, last].filter((part): part is string => typeof part === "string" && part.length > 0).join(" ");
   return joined.length > 0 ? joined : undefined;
+}
+
+function customerNameParts(customer: BookingCreateInput["customer"]): { firstName: string; lastName: string } | undefined {
+  const givenName = customer?.given_name?.trim();
+  const familyName = customer?.family_name?.trim();
+  if (givenName && familyName) {
+    return { firstName: givenName, lastName: familyName };
+  }
+
+  const parts = customer?.display_name?.trim().split(/\s+/).filter(Boolean) ?? [];
+  if (parts.length !== 2) {
+    return undefined;
+  }
+  return { firstName: parts[0], lastName: parts[1] };
 }
 
 function numberField(record: JsonRecord, key: string): number | undefined {
@@ -2283,13 +2771,14 @@ function bookingApprovalSummary(
   const deposit = displayMoney(policy.deposit);
   const cancellationFee = displayMoney(policy.cancellation_fee);
   const noShowFee = displayMoney(policy.no_show_fee);
+  const customerName = customerNameForApproval(input.customer);
   const summary = [
     `Book ${service.name}`,
-    price ? `for ${price}` : undefined,
-    `on ${input.date} at ${input.time}`,
-    slot.schedule_timezone ? `(${slot.schedule_timezone})` : undefined,
-    `with provider ${input.provider_id}`,
-    `at schedule ${input.schedule_id}`
+    customerName ? `for ${customerName}` : undefined,
+    price ? `priced at ${price}` : undefined,
+    `on ${input.date} at ${input.time} merchant-local time`,
+    "with the selected provider",
+    "at the selected location"
   ].filter(isPresent).join(" ");
 
   const policyParts = [
@@ -2300,6 +2789,15 @@ function bookingApprovalSummary(
   ].filter(isPresent);
 
   return `${summary}. Policy: ${policyParts.join("; ")}.`;
+}
+
+function customerNameForApproval(customer: BookingCreateInput["customer"]): string | undefined {
+  const parts = customerNameParts(customer);
+  if (parts) {
+    return joinNameParts(parts.firstName, parts.lastName);
+  }
+  const displayName = customer?.display_name?.trim();
+  return displayName && displayName.length > 0 ? displayName : undefined;
 }
 
 function paymentRequirementSummary(requirement: Policy["payment_requirement"], deposit: string | undefined): string {
@@ -2347,15 +2845,12 @@ function stableStringify(value: unknown): string {
 }
 
 function isSlotConflict(error: OpeningsHttpError): boolean {
-  // A 409 is an unambiguous conflict. The body-keyword scan is a fallback for
-  // platforms that report conflicts as 400/422 with a descriptive body, but it
-  // must never fire on auth (403) or server (5xx) errors that merely mention a
-  // "slot": those are not retryable conflicts and would otherwise loop.
-  if (error.status === 409) {
-    return true;
-  }
-  if (error.status === 400 || error.status === 422) {
-    return /unavailable|slot|conflict|taken/i.test(error.body);
+  // Structured Openings codes win before this fallback. Without a code, only
+  // map business/validation statuses to slot_taken when the body actually
+  // describes availability; a generic 409 can also be an idempotency or other
+  // conflict that should not ask the agent to pick another slot.
+  if (error.status === 400 || error.status === 409 || error.status === 422) {
+    return /unavailable|slot|taken/i.test(error.body);
   }
   return false;
 }

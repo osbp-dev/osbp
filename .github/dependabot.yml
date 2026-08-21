@@ -5,6 +5,17 @@ updates:
     schedule:
       interval: weekly
     open-pull-requests-limit: 5
+    ignore:
+      # Stay on the Node 24 line: keep @types/node 24.x minor/patch updates,
+      # but skip the next major (24 -> 26). Drop this to move majors.
+      - dependency-name: "@types/node"
+        update-types: ["version-update:semver-major"]
+      # Stay on zod 3.x while @osbp/mcp-server uses @modelcontextprotocol/sdk
+      # 1.x. zod 4 breaks the SDK's zod v3 compatibility shim; drop this after
+      # migrating osbp-mcp-server to SDK v2 / Standard Schema. Keep mirrored with
+      # the private source-repo Dependabot entry.
+      - dependency-name: "zod"
+        update-types: ["version-update:semver-major"]
 
   - package-ecosystem: github-actions
     directory: "/"

@@ -6,6 +6,8 @@ import type {
   BookingCreateInput,
   BookingStatusInput,
   Customer,
+  Money,
+  PendingApproval,
   PlatformIdentity,
   Policy,
   PolicyExplainInput,
@@ -18,14 +20,30 @@ import type {
   VerificationSendInput,
   VerificationVerifyInput
 } from "@osbp/core";
-import { OSBP_VERSION, validateMandate } from "@osbp/core";
-import { createHash } from "node:crypto";
+import { OSBP_VERSION, requireApproval, validateMandate } from "@osbp/core";
+import { createHash, randomUUID } from "node:crypto";
 
 export interface StarterBookingAdapterConfig {
+  // Required operator-supplied API origin. Real adapters must not default this
+  // to a shared tenant or live platform account.
   apiBaseUrl: string;
   organizationId: string;
+  // Positive milliseconds for each outbound request. Configure deliberately in
+  // copied adapters instead of relying on Node's process-level defaults.
+  httpTimeoutMs?: number;
   credentials?: StarterBookingAdapterCredentials;
-  idempotencyStorePath?: string;
+  // Copy this to the platform-specific version header, media type, or path
+  // segment when the platform has a native pin. Leave absent only when the
+  // platform has no supportable request-side version mechanism.
+  nativeApiVersion?: string;
+  // Customer fallback is a migration/testing convenience, not identity proof.
+  // Copied adapters must keep it disabled unless the operator explicitly opts in.
+  enableConfiguredCustomerFallback?: boolean;
+  configuredCustomerFallback?: StarterCustomer;
+  // Undefined means omit platform notification flags by default. Replace this
+  // simple marker with platform-specific notification controls only when the
+  // operator has approved the behavior.
+  notificationBehavior?: StarterNotificationBehavior;
 }
 
 export interface StarterBookingAdapterCredentials {
@@ -34,6 +52,8 @@ export interface StarterBookingAdapterCredentials {
   clientId?: string;
   clientSecret?: string;
 }
+
+export type StarterNotificationBehavior = "omit" | "operator_configured";
 
 interface IdempotencyEntry {
   payloadHash: string;
@@ -47,12 +67,24 @@ interface CreateValidationContext {
   policy: Policy;
 }
 
+interface PlatformCreateResult {
+  receipt: Receipt;
+  booking?: Booking;
+}
+
+interface InFlightBooking {
+  payloadHash: string;
+  promise: Promise<AdapterResult<Receipt>>;
+}
+
 type JsonRecord = Record<string, unknown>;
 
 export class StarterBookingAdapter implements BookingAdapter {
   readonly platform: PlatformIdentity = { vendor: "replace-me", api_version: "replace-me" };
   private lastUpstreamMeta: UpstreamMeta | undefined;
   private readonly idempotencyCache = new Map<string, IdempotencyEntry>();
+  private readonly inFlightBookings = new Map<string, InFlightBooking>();
+  private readonly pendingApprovals = new Map<string, PendingApproval>();
 
   get upstreamMeta(): UpstreamMeta | undefined {
     return this.lastUpstreamMeta;
@@ -114,7 +146,7 @@ export class StarterBookingAdapter implements BookingAdapter {
      * - Call the platform's customer verification send endpoint.
      * - Return sent: true with method "sms" or "email" only when the platform
      *   accepted the send request.
-     * - Return verification_not_supported when the platform has no verification
+     * - Return a clear unsupported-verification Problem when the platform has no verification
      *   concept and policy.explain reports verification_method: "none".
      * Worked example: packages/reference-backend/src/index.ts
      * SyntheticBookingAdapter.sendVerification.
@@ -140,17 +172,39 @@ export class StarterBookingAdapter implements BookingAdapter {
      * TODO booking.create:
      * - Resolve the service, selected slot, and policy using the platform
      *   mapping helpers before any mutation.
+     * - Fail closed when required booking truth is missing. Do not invent
+     *   service, provider, schedule, price, customer identity, policy,
+     *   verification, or payment facts to satisfy a create endpoint.
      * - Keep validateMandate exactly before the platform create call. The host
      *   does not enforce it for the adapter.
      * - Use input.idempotency_key only for the local cache or a platform-native
      *   idempotency primitive that is empirically confirmed. Do not pipe it into
      *   unrelated id-like fields.
+     * - Use config.nativeApiVersion only as a copy-paste marker for the
+     *   platform's real version pin. Put the actual header, media type, or path
+     *   version in explicit adapter code instead of hiding it in a generic
+     *   client abstraction.
+     * - Use config.enableConfiguredCustomerFallback only when the operator has
+     *   deliberately configured a fallback customer. Treat that fallback as a
+     *   booking convenience, not identity proof; production identity should move
+     *   to the host/auth boundary.
+     * - Omit notification flags by default. If the platform sends emails, SMS,
+     *   or merchant/customer notifications, expose an operator-approved config
+     *   choice instead of hardcoding platform notification behavior.
+     * - Require final approval after validation and before the platform create
+     *   call. The approval token is deliberately bound to the exact payload
+     *   hash, so a retry cannot change the booking and reuse the same token.
      * - Map success into a human-readable Receipt with booking_id, then store
      *   the receipt in the local idempotency cache.
      * Worked example: packages/reference-backend/src/index.ts
      * SyntheticBookingAdapter.createBooking.
      */
-    const payloadHash = stableHash(redactVerificationCode(input));
+    // Approval and verification are retry artifacts, not new booking intent:
+    // the first call (no approval), the approved retry, and the verification
+    // retry must all resolve to the same pending approval entry and the same
+    // idempotency record. All material booking fields, including the
+    // idempotency_key itself, remain in the hash.
+    const payloadHash = stableHash(redactTransientCreateFields(input));
     const cached = this.idempotencyCache.get(input.idempotency_key);
     if (cached) {
       return cached.payloadHash === payloadHash ? cached.result : idempotencyConflict();
@@ -173,7 +227,26 @@ export class StarterBookingAdapter implements BookingAdapter {
       return { ok: false, problem: validation.problem };
     }
 
-    return notImplemented("booking.create has not been mapped to the target platform API");
+    const approvalGate = requireApproval({
+      approval: input.approval,
+      payloadHash,
+      summary: bookingApprovalSummary(input, context.value.service, context.value.slot, context.value.policy),
+      store: this.pendingApprovals,
+      now: Date.now(),
+      newToken: randomUUID
+    });
+    if (!approvalGate.ok) {
+      return approvalGate;
+    }
+
+    const inFlight = this.inFlightBookings.get(input.idempotency_key);
+    if (inFlight) {
+      return inFlight.payloadHash === payloadHash ? inFlight.promise : idempotencyConflict();
+    }
+
+    const attempt = this.performApprovedCreate(input, payloadHash, context.value);
+    this.inFlightBookings.set(input.idempotency_key, { payloadHash, promise: attempt });
+    return attempt;
   }
 
   async getBooking(input: BookingStatusInput): Promise<AdapterResult<Booking>> {
@@ -198,6 +271,13 @@ export class StarterBookingAdapter implements BookingAdapter {
     return notImplemented("booking.status has not been mapped to the target platform API");
   }
 
+  protected async createBookingOnPlatform(
+    _input: BookingCreateInput,
+    _context: CreateValidationContext
+  ): Promise<AdapterResult<PlatformCreateResult>> {
+    return notImplemented("booking.create has not been mapped to the target platform API");
+  }
+
   protected async resolveCreateValidationContext(
     input: BookingCreateInput
   ): Promise<AdapterResult<CreateValidationContext>> {
@@ -219,6 +299,11 @@ export class StarterBookingAdapter implements BookingAdapter {
     });
     if (!availability.ok) {
       return availability;
+    }
+
+    const providerScope = providerScopeProblem(input);
+    if (providerScope) {
+      return providerScope;
     }
 
     const startsAtLocal = `${input.date}T${input.time.length === 5 ? `${input.time}:00` : input.time}`;
@@ -250,25 +335,68 @@ export class StarterBookingAdapter implements BookingAdapter {
   }
 
   protected async requestJson<T>(path: string, init: RequestInit = {}): Promise<T> {
-    const url = new URL(path, withTrailingSlash(this.config.apiBaseUrl));
-    const response = await fetch(url, {
-      ...init,
-      headers: {
-        accept: "application/json",
-        "content-type": "application/json",
-        "user-agent": `OSBP/${OSBP_VERSION} adapter-starter/${OSBP_VERSION} node/${process.versions.node.split(".")[0]}`,
-        "x-osbp-source": `adapter-starter/${OSBP_VERSION}`,
-        ...authHeaders(this.config.credentials),
-        ...init.headers
-      }
-    });
-    this.lastUpstreamMeta = captureUpstreamMeta(`${(init.method ?? "GET").toUpperCase()} ${url.pathname}`, response);
-
-    if (!response.ok) {
-      throw new StarterAdapterHttpError(response.status, response.statusText, url.pathname, await response.text());
+    const baseUrl = new URL(withTrailingSlash(this.config.apiBaseUrl));
+    const url = new URL(path, baseUrl);
+    if (url.origin !== baseUrl.origin) {
+      throw new Error(`request path resolved outside configured API origin: ${redactPathSegments(url.pathname)}`);
     }
+    const timeout = requestTimeout(this.config.httpTimeoutMs, init.signal);
+    try {
+      const response = await fetch(url, {
+        ...init,
+        signal: timeout.signal,
+        headers: {
+          accept: "application/json",
+          "content-type": "application/json",
+          "user-agent": `OSBP/${OSBP_VERSION} adapter-starter/${OSBP_VERSION} node/${process.versions.node.split(".")[0]}`,
+          "x-osbp-source": `adapter-starter/${OSBP_VERSION}`,
+          ...authHeaders(this.config.credentials),
+          ...init.headers
+        }
+      });
+      this.lastUpstreamMeta = captureUpstreamMeta(
+        `${(init.method ?? "GET").toUpperCase()} ${redactPathSegments(url.pathname)}`,
+        response
+      );
 
-    return (await response.json()) as T;
+      if (!response.ok) {
+        throw new StarterAdapterHttpError(
+          response.status,
+          response.statusText,
+          redactPathSegments(url.pathname),
+          await response.text()
+        );
+      }
+
+      return (await response.json()) as T;
+    } finally {
+      timeout.cleanup();
+    }
+  }
+
+  private async performApprovedCreate(
+    input: BookingCreateInput,
+    payloadHash: string,
+    context: CreateValidationContext
+  ): Promise<AdapterResult<Receipt>> {
+    try {
+      const result = await this.createBookingOnPlatform(input, context);
+      if (!result.ok) {
+        return result;
+      }
+      this.rememberIdempotentResult(
+        input.idempotency_key,
+        payloadHash,
+        ok(result.value.receipt),
+        result.value.booking
+      );
+      this.pendingApprovals.delete(payloadHash);
+      return ok(result.value.receipt);
+    } catch (error) {
+      return problemFromCreateException(error);
+    } finally {
+      this.inFlightBookings.delete(input.idempotency_key);
+    }
   }
 
   protected rememberIdempotentResult(
@@ -329,11 +457,50 @@ function stableJson(value: unknown): string {
     .join(",")}}`;
 }
 
-function redactVerificationCode(input: BookingCreateInput): BookingCreateInput {
+function redactTransientCreateFields(input: BookingCreateInput): BookingCreateInput {
   return {
     ...input,
-    verification_code: undefined
+    verification_code: undefined,
+    approval: undefined
   };
+}
+
+function bookingApprovalSummary(
+  input: BookingCreateInput,
+  service: Service,
+  slot: Slot,
+  policy: Policy
+): string {
+  const price = slot.price ?? service.price;
+  const priceText = formatMoney(price);
+  const paymentText = policy.payment_requirement === "none"
+    ? "No upfront payment or deposit is required to book."
+    : `Payment requirement: ${policy.payment_requirement ?? "unknown"}.`;
+  const cancellationFee = formatOptionalMoney(policy.cancellation_fee);
+  const noShowFee = formatOptionalMoney(policy.no_show_fee);
+  const policyParts = [
+    paymentText,
+    cancellationFee ? `Cancellation fee: ${cancellationFee}.` : undefined,
+    noShowFee ? `No-show fee: ${noShowFee}.` : undefined
+  ].filter((part): part is string => Boolean(part));
+  return `Book ${service.name} on ${input.date} at ${input.time} merchant-local time for ${priceText}. ${policyParts.join(" ")}`;
+}
+
+function formatMoney(money: Money | undefined): string {
+  if (!money) {
+    return "the selected price";
+  }
+  if (money.display) {
+    return money.display;
+  }
+  if (money.amount_minor !== undefined) {
+    return `${money.amount_minor} ${money.currency} minor units`;
+  }
+  return `${money.currency} ${money.type ?? "unknown"} price`;
+}
+
+function formatOptionalMoney(money: Money | undefined): string | undefined {
+  return money ? formatMoney(money) : undefined;
 }
 
 function idempotencyConflict<T>(): AdapterResult<T> {
@@ -345,6 +512,74 @@ function idempotencyConflict<T>(): AdapterResult<T> {
       retryable: false
     }
   };
+}
+
+function problemFromCreateException<T>(error: unknown): AdapterResult<T> {
+  logCreateException(error);
+  if (error instanceof StarterAdapterHttpError) {
+    const rateLimited = error.status === 429;
+    return {
+      ok: false,
+      problem: {
+        code: rateLimited ? "rate_limited" : "internal_adapter_error",
+        message: `Target platform request failed during booking.create with HTTP ${error.status} at ${error.path}.`,
+        retryable: rateLimited || error.status >= 500
+      }
+    };
+  }
+
+  return {
+    ok: false,
+    problem: {
+      code: "internal_adapter_error",
+      message: "Adapter starter booking.create failed before returning a platform result.",
+      retryable: false
+    }
+  };
+}
+
+function logCreateException(error: unknown): void {
+  if (error instanceof StarterAdapterHttpError) {
+    console.error(`[adapter-starter] booking.create HTTP ${error.status} at ${error.path}`);
+    return;
+  }
+
+  const name = error instanceof Error
+    ? safeDiagnosticName(error.constructor.name || error.name)
+    : typeof error;
+  console.error(`[adapter-starter] booking.create threw ${name}`);
+}
+
+function safeDiagnosticName(name: string): string {
+  return /^[A-Za-z_$][A-Za-z0-9_$.-]{0,80}$/.test(name) ? name : "unknown";
+}
+
+function providerScopeProblem(input: BookingCreateInput): AdapterResult<CreateValidationContext> | undefined {
+  const providerScope = input.mandate.provider_ids;
+  if (!providerScope) {
+    return undefined;
+  }
+  if (!input.provider_id) {
+    return {
+      ok: false,
+      problem: {
+        code: "provider_unknown",
+        message: "Selected slot does not identify provider required by BookingMandate scope",
+        retryable: false
+      }
+    };
+  }
+  if (!providerScope.includes(input.provider_id)) {
+    return {
+      ok: false,
+      problem: {
+        code: "provider_not_allowed",
+        message: "Selected provider is outside BookingMandate scope",
+        retryable: false
+      }
+    };
+  }
+  return undefined;
 }
 
 function authHeaders(credentials: StarterBookingAdapterCredentials | undefined): Record<string, string> {
@@ -386,15 +621,69 @@ function rateLimitHeaders(headers: Headers): Record<string, string> | undefined 
   const result: Record<string, string> = {};
   for (const [name, value] of headers) {
     const lower = name.toLowerCase();
-    if (lower === "ratelimit" || lower === "ratelimit-policy" || lower.startsWith("x-ratelimit-")) {
+    if (lower === "retry-after" || lower === "ratelimit" || lower === "ratelimit-policy" || lower.startsWith("x-ratelimit-")) {
       result[lower] = value;
     }
   }
   return Object.keys(result).length === 0 ? undefined : result;
 }
 
+function redactPathSegments(pathname: string): string {
+  return pathname
+    .split("/")
+    .map((segment) => {
+      const decoded = safeDecode(segment);
+      const phoneCandidate = decoded.replace(/[\s().-]/g, "");
+      if (/^\+?\d{7,15}$/.test(phoneCandidate) || decoded.includes("@")) {
+        return ":redacted";
+      }
+      return segment;
+    })
+    .join("/");
+}
+
+function safeDecode(segment: string): string {
+  try {
+    return decodeURIComponent(segment);
+  } catch {
+    return segment;
+  }
+}
+
 function withTrailingSlash(value: string): string {
   return value.endsWith("/") ? value : `${value}/`;
+}
+
+function requestTimeout(
+  timeoutMs: number | undefined,
+  sourceSignal: AbortSignal | null | undefined
+): { signal: AbortSignal | undefined; cleanup: () => void } {
+  if (timeoutMs === undefined) {
+    return { signal: sourceSignal ?? undefined, cleanup: () => {} };
+  }
+  if (!Number.isFinite(timeoutMs) || timeoutMs < 1) {
+    throw new Error("httpTimeoutMs must be a positive finite number");
+  }
+
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), timeoutMs);
+  const abortFromSource = () => {
+    controller.abort(sourceSignal?.reason);
+  };
+
+  if (sourceSignal?.aborted) {
+    controller.abort(sourceSignal.reason);
+  } else {
+    sourceSignal?.addEventListener("abort", abortFromSource, { once: true });
+  }
+
+  return {
+    signal: controller.signal,
+    cleanup: () => {
+      clearTimeout(timer);
+      sourceSignal?.removeEventListener("abort", abortFromSource);
+    }
+  };
 }
 
 export type StarterCustomer = Customer;

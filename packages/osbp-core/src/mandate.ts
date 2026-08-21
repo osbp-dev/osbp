@@ -99,7 +99,7 @@ export function validateMandate(input: MandateValidationInput): MandateValidatio
     return priceValidation;
   }
 
-  const policyValidation = validatePolicyScope(mandate, input.policy, input.service);
+  const policyValidation = validatePolicyScope(mandate, input.policy, input.service, input.action);
   if (!policyValidation.ok) {
     return policyValidation;
   }
@@ -110,9 +110,9 @@ export function validateMandate(input: MandateValidationInput): MandateValidatio
 function validateSlotScope(mandate: BookingMandate, slot: Slot): MandateValidationResult {
   // Enforce the wall-clock side of the time-discipline rule (see the spec
   // Time Discipline section, schema.md#time-discipline). The four fields below
-  // are wall-clock by contract; tz-aware values would shift compareDateLike
-  // results by the host's offset under Date.parse and silently misjudge slot
-  // scope. Reject before the comparators run. Mirror of the instant-side
+  // are wall-clock by contract; tz-aware values would mix absolute instants
+  // with merchant-local strings and silently misjudge slot scope. Reject
+  // before the comparators run. Mirror of the instant-side
   // strictness on BookingMandate.expires_at; same hasExplicitOffset helper,
   // inverse assertion. Note: Slot now also carries absolute-instant
   // starts_at / ends_at (which MUST carry an offset); those are deliberately
@@ -131,13 +131,13 @@ function validateSlotScope(mandate: BookingMandate, slot: Slot): MandateValidati
     if (hasExplicitOffset(value)) {
       return reject(
         "invalid_mandate",
-        `${name} must be wall-clock (no tz offset); got ${JSON.stringify(value)}. Wall-clock comparators silently shift by the host's timezone when given mixed-category inputs; see the spec Time Discipline section.`
+        `${name} must be wall-clock (no tz offset); got ${JSON.stringify(value)}. Wall-clock bounds must stay in the merchant-local category; see the spec Time Discipline section.`
       );
     }
     if (!isWallClockDateTime(value)) {
       return reject(
         "invalid_mandate",
-        `${name} must be a wall-clock datetime like 2026-07-07T09:00 (no offset); got ${JSON.stringify(value)}. Date-only or unparsable values fall back to lexical comparison and silently widen the window.`
+        `${name} must be a wall-clock datetime like 2026-07-07T09:00 (no offset); got ${JSON.stringify(value)}. Date-only, impossible, or unparsable values cannot safely bound a booking window.`
       );
     }
   }
@@ -158,6 +158,13 @@ function validateSlotScope(mandate: BookingMandate, slot: Slot): MandateValidati
     return reject("slot_too_early", "Selected slot starts before BookingMandate.earliest_start");
   }
 
+  if (mandate.latest_end && !slot.ends_at_local) {
+    return reject(
+      "invalid_mandate",
+      "BookingMandate.latest_end is set but the selected slot has no ends_at_local; fail closed before mutation"
+    );
+  }
+
   const slotEnd = slot.ends_at_local ?? slot.starts_at_local;
   if (!isAtOrBefore(slotEnd, mandate.latest_end)) {
     return reject("slot_too_late", "Selected slot ends after BookingMandate.latest_end");
@@ -174,17 +181,27 @@ function validatePriceScope(
 ): MandateValidationResult {
   const price = slot?.price ?? service?.price;
   const cap = mandate.max_price;
+  const isMutation = action === "booking.create";
+  const priceIsNonFixed =
+    price !== undefined &&
+    (price.amount_minor === undefined || (price.type !== undefined && price.type !== "fixed"));
 
   // An absent cap means the user did not restrict price on this dimension, so
-  // there is nothing to bound. A present cap must actually bound the price: for
-  // a mutation, a cap that cannot be applied (no numeric ceiling, or no fixed
-  // price to compare against) is unbounded authority and fails closed, mirroring
-  // the policy-fee path rather than silently passing.
+  // there is usually nothing to bound. For mutation, however, a present-but-not-
+  // fixed selected price is booking truth the agent cannot invent, so it still
+  // needs explicit confirmation even when the user did not set a numeric cap.
+  // A present cap must actually bound the price: for a mutation, a cap that
+  // cannot be applied (no numeric ceiling, or no fixed price to compare against)
+  // is unbounded authority and fails closed, mirroring the policy-fee path
+  // rather than silently passing.
   if (!cap) {
-    return { ok: true };
+    return isMutation && priceIsNonFixed
+      ? reject(
+          "requires_user_confirmation",
+          "Selected service or slot price is not a fixed amount at booking time; fail closed before mutation"
+        )
+      : { ok: true };
   }
-
-  const isMutation = action === "booking.create";
 
   if (cap.amount_minor !== undefined) {
     if (!price || price.amount_minor === undefined) {
@@ -225,12 +242,12 @@ function validatePriceScope(
 function validatePolicyScope(
   mandate: BookingMandate,
   policy: Policy | undefined,
-  service: Service | undefined
+  service: Service | undefined,
+  action: OsbpToolName
 ): MandateValidationResult {
-  // Fail closed unconditionally on consultation services. hasConsultation: true
-  // services drive a 4-step quote workflow (consultation
-  // form → quote → quote-pinned booking with ServiceRequest.id as requestId)
-  // that OSBP v0.1.0 cannot drive end-to-end. There is intentionally no
+  // Fail closed unconditionally on consultation services. Consultation services
+  // route through a quote workflow and a platform-specific quote-pinned booking
+  // record that OSBP v0.1.0 cannot drive end-to-end. There is intentionally no
   // mandate opt-in: the upstream call cannot succeed for these services
   // today, so an `allow_consultation` bypass would just route the agent
   // into the failure mode the validator is meant to close.
@@ -241,7 +258,13 @@ function validatePolicyScope(
     );
   }
 
-  if (!policy?.payment_requirement || policy.payment_requirement === "none") {
+  if (!policy?.payment_requirement) {
+    return action === "booking.create"
+      ? reject("requires_user_confirmation", "Payment requirement is unknown; fail closed before mutation")
+      : { ok: true };
+  }
+
+  if (policy.payment_requirement === "none") {
     return { ok: true };
   }
 
@@ -316,32 +339,62 @@ function hasExplicitOffset(value: string): boolean {
 function isWallClockDateTime(value: string): boolean {
   // Wall-clock datetime: a date plus a time, no offset (the offset case is
   // rejected separately). Requiring the time component rejects date-only
-  // strings, whose comparison drifts by the host offset; requiring a parseable
-  // value rejects garbage that would otherwise fall through to the lexical
-  // comparison in compareDateLike and silently widen the window.
-  if (!/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}(:\d{2})?(\.\d+)?$/.test(value)) {
-    return false;
-  }
-  return Number.isFinite(Date.parse(value));
+  // strings, and normalizing by components rejects impossible calendar dates
+  // without involving the host timezone.
+  return normalizeWallClockDateTime(value) !== undefined;
 }
 
 function isAtOrAfter(value: string, lowerBound: string | undefined): boolean {
-  return lowerBound === undefined || compareDateLike(value, lowerBound) >= 0;
+  return lowerBound === undefined || compareWallClockDateTime(value, lowerBound) >= 0;
 }
 
 function isAtOrBefore(value: string, upperBound: string | undefined): boolean {
-  return upperBound === undefined || compareDateLike(value, upperBound) <= 0;
+  return upperBound === undefined || compareWallClockDateTime(value, upperBound) <= 0;
 }
 
-function compareDateLike(left: string, right: string): number {
-  const leftTime = Date.parse(left);
-  const rightTime = Date.parse(right);
-
-  if (Number.isFinite(leftTime) && Number.isFinite(rightTime)) {
-    return leftTime - rightTime;
+function compareWallClockDateTime(left: string, right: string): number {
+  const normalizedLeft = normalizeWallClockDateTime(left);
+  const normalizedRight = normalizeWallClockDateTime(right);
+  if (normalizedLeft === undefined || normalizedRight === undefined) {
+    return left < right ? -1 : left > right ? 1 : 0;
   }
 
-  return left.localeCompare(right);
+  return normalizedLeft < normalizedRight ? -1 : normalizedLeft > normalizedRight ? 1 : 0;
+}
+
+function normalizeWallClockDateTime(value: string): string | undefined {
+  const match = /^(\d{4})-(\d{2})-(\d{2})T(\d{2}):(\d{2})(?::(\d{2})(\.\d+)?)?$/.exec(value);
+  if (!match) {
+    return undefined;
+  }
+
+  const [, yearText, monthText, dayText, hourText, minuteText, secondText = "00", fractionText = ""] = match;
+  const year = Number(yearText);
+  const month = Number(monthText);
+  const day = Number(dayText);
+  const hour = Number(hourText);
+  const minute = Number(minuteText);
+  const second = Number(secondText);
+
+  if (month < 1 || month > 12 || hour > 23 || minute > 59 || second > 59) {
+    return undefined;
+  }
+
+  const instant = new Date(Date.UTC(year, month - 1, day, hour, minute, second));
+  if (
+    instant.getUTCFullYear() !== year ||
+    instant.getUTCMonth() !== month - 1 ||
+    instant.getUTCDate() !== day ||
+    instant.getUTCHours() !== hour ||
+    instant.getUTCMinutes() !== minute ||
+    instant.getUTCSeconds() !== second
+  ) {
+    return undefined;
+  }
+
+  const normalizedFraction = fractionText.replace(/0+$/, "");
+  const fraction = normalizedFraction === "." ? "" : normalizedFraction;
+  return `${yearText}-${monthText}-${dayText}T${hourText}:${minuteText}:${secondText}${fraction}`;
 }
 
 function reject(code: string, message: string): MandateValidationResult {

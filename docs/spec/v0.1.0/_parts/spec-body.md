@@ -1,6 +1,6 @@
 The Open Service Booking Protocol (OSBP) is a small, open protocol that lets an AI agent book a service appointment only inside a user-approved authorization called a `BookingMandate`. The agent can search, compare, and prepare freely; it can mutate only inside the mandate. OSBP authorizes the booking, not the payment.
 
-A service booking is a provider-bound timeslot: one named person's time, at one place, for one duration, under one cancellation policy, that cannot be double-sold. OSBP models that object directly. The merchant's booking platform remains the system of record; OSBP validates authority, translates tool calls, and audits what happened.
+The v0.1.0 proof model is a provider-bound appointment timeslot: usually one provider's time, one schedule/location, one duration, and one booking policy, with inventory that must not be double-sold. OSBP models that narrow object directly for this release. The merchant's booking platform remains the system of record; OSBP validates authority, translates tool calls, and audits what happened.
 
 This document is the complete v0.1.0 contract: the participants, the mandate, the eight tools and their wire shapes, the result envelope and error codes, the enforcement rules, and the audit trail. The key words *must*, *must not*, *should*, and *may* are to be interpreted as described in [RFC 2119](https://www.rfc-editor.org/rfc/rfc2119): *must* is an absolute requirement, *should* a strong recommendation with rare justified exceptions, *may* a true option. Platform integrators should read [Core Objects](#core-objects) and the [Adapter Contract](#adapter-contract) first; agent builders should start with [BookingMandate](#bookingmandate) and the [Tool Set](#tool-set).
 
@@ -15,8 +15,8 @@ BookingMandate → lookup → policy readback → create → verification if req
 | Participant | Role |
 |---|---|
 | Customer | The human principal: approves the mandate and the final slot, and supplies the verification code when required. In v0.1.0 the authorizing user and the customer are usually the same person |
-| AI agent | Converts the customer's intent into a scoped `BookingMandate` and calls OSBP tools. OSBP is host-agnostic: it speaks MCP, so any MCP-compatible host (Claude, ChatGPT, and others) can fill this role; there is no host-specific API to implement |
-| OSBP server | Validates mandate scope, exposes the eight booking tools, records audit events |
+| AI agent | Converts the customer's intent into a scoped `BookingMandate` and calls OSBP tools. OSBP is host-agnostic at the protocol boundary, and v0.1.0 ships the local stdio MCP path first. Hosts that can launch local MCP tools can fill this role without a host-specific OSBP API |
+| OSBP server | Exposes the eight booking tools and records audit events. A conforming OSBP implementation validates mandate scope before mutation; in the reference implementation the adapter performs that validation before create |
 | Platform adapter | Translates OSBP calls into the booking platform's API, and platform responses into OSBP results |
 | Booking platform | Merchant system of record for services, availability, and appointments |
 
@@ -30,29 +30,31 @@ The happy path runs lookup, policy readback, explicit approval, then mutation:
 Customer
   → AI agent
   → MCP tool call
-  → OSBP server (mandate validation, audit)
+  → OSBP server / adapter boundary (mandate validation before mutation, audit at tool boundary)
   → platform adapter
   → booking platform API
   → normalized OSBP result
   → receipt and audit response to the agent
 ```
 
-In tool terms: `service.describe` → `availability.find` → `policy.explain` → explicit user approval → `booking.create` validation preflight → `booking.create` approved retry → `booking.status`. The agent must read the policy impact back to the user before any mutation, and must ask before booking.
+In tool terms: `service.describe` → `availability.find` → `policy.explain` → `booking.create` validation preflight with no platform appointment create → explicit user approval of the returned summary → `booking.create` approved retry → `booking.status`. The agent must read the policy impact back to the user before any mutation, and must ask before booking.
 
-Final confirmation is an adapter-side gate shared by every OSBP adapter through `requireApproval` in `@osbp/core`. A valid `booking.create` call without `approval` returns `requires_user_confirmation` before any platform appointment create call. This gate exists to force the fully resolved service, slot, price, and policy into a user-visible summary, so the concrete booking is understood and authorized by the user before the platform sees a mutation. The agent must show the returned summary to the user, get final confirmation, then retry `booking.create` with the same `idempotency_key` and `approval`.
+Final confirmation is an adapter-side gate. The reference adapter uses `requireApproval` in `@osbp/core`; other v0.1.0 adapters must enforce equivalent behavior. A valid `booking.create` call without `approval` returns `requires_user_confirmation` before any platform appointment create call. This gate exists to force the resolved service, merchant-local time, price, and policy into a user-visible summary, so the concrete booking is understood and authorized by the user before the platform sees an appointment-create mutation. Provider and location scope are pinned by ids and should be shown with display names when the adapter can resolve them safely. The challenge-form problem message carries both a user-facing approval summary and a machine-directed retry instruction. That retry instruction must embed the token exactly as `approval.token="<token>"`, so agents, audit redactors, and conformance checks can recognize it without parsing free prose. The agent must show only the approval summary to the user, get final confirmation, then retry `booking.create` with the same `idempotency_key` and `approval`.
 
 Verification is agent-mediated. The server never sees a code except to pass it through:
 
 ```
 booking.create
   → adapter requires final confirmation → requires_user_confirmation (retryable, no appointment created)
-  → agent shows the exact summary and asks the customer to confirm
+  → agent shows the approval summary and asks the customer to confirm
   → booking.create retried with the same idempotency_key plus approval
   → platform requires verification → requires_verification (retryable)
   → verification.send
   → agent asks the customer for the code out of band
   → booking.create retried with the same idempotency_key plus verification_code
 ```
+
+Product posture: v0.1.0 defines no cancellation tool, so every create is irreversible within the protocol; for an agent, a clarifying question is always cheaper than a mutation made in doubt.
 
 ## Non-Goals
 
@@ -66,19 +68,26 @@ v0.1.0 does not include:
 - production mandate signing
 - public conformance certification
 - concurrent multi-tenant hosting (one server instance serving multiple users or organizations at once)
+- classes, group capacity, multi-attendee bookings, multi-resource reservations, route/dispatch visits, waitlists, or recurring series
 
 ## Protocol Model
 
 The concepts every tool call shares: the domain objects, the mandate that authorizes mutation, and the money and time conventions they obey.
 
+### Internationalization Strategy
+
+OSBP v0.1.0 is global-ready at the protocol boundary, not a server-side localization system. The wire carries canonical machine-readable values: ISO 4217 currency codes and minor units, IANA timezones, RFC 3339 instants, merchant-local wall-clock strings, ISO 8601 durations, ISO weekday numbers, E.164 phone numbers, RFC 5322/RFC 6531 email addresses, and ISO 3166-1 country codes. The agent or host localizes presentation for the user from those canonical values.
+
+Server-generated prose in v0.1.0 is English and carries no language tag: `Problem.message`, approval summaries, `Receipt.text`, and policy prose such as `cancellation_note` are explanatory text, not locale-specific UI. Agents conversing with a user in another language should translate that prose faithfully while preserving amounts, merchant-local times, and the merchant-visible customer name exactly as returned; they must not carry the machine-directed retry instruction or approval token into user-facing text. This is an implemented strategy for scaling internationally without adding server-side translations to the proof of concept; it is not a broad compatibility or global production-support promise.
+
 ### Core Objects
 
 - **Organization**: the merchant (a clinic, a studio, a workshop). Identified by `organization_id`, the id the mandate is anchored to.
-- **Schedule**: a bookable calendar. A schedule belongs to a location and can be specific to one provider; platforms can expose per-provider sub-schedules, in which case the `schedule_id` a slot carries transitively pins that provider at that location. Whatever `schedule_id` a slot returns is the create-ready id.
-- **Provider**: the named person whose time the slot binds.
-- **Service**: the thing being booked, with duration, price, and payment requirements.
-- **Slot**: one bookable opening on a schedule: a service, a provider, a start time, a price. The start is carried twice: an absolute RFC 3339 instant in `starts_at` and the merchant-local wall-clock in `starts_at_local`.
-- **Customer**: the person the appointment is for, whether or not any payment is involved. Usually the same human as the user approving the mandate, but the roles are distinct: the user authorizes, the customer attends. Customer phone numbers use [E.164](https://www.itu.int/rec/T-REC-E.164) format ("+15555550100"); email addresses are plain [RFC 5322](https://www.rfc-editor.org/rfc/rfc5322) addresses. Both pass through to the platform, which is the enforcer of its own contact formats.
+- **Schedule**: a bookable calendar or platform-specific availability container. In the v0.1.0 proof topology, the `schedule_id` a slot carries is the create-ready id and may also pin the location or provider, depending on the platform's native model.
+- **Provider**: the person or staff resource whose time the slot binds.
+- **Service**: the thing being booked, with duration, price, and payment requirements. `Service.options` may expose variants or add-ons for display and agent reasoning, but v0.1.0 `booking.create` has no option selector. An agent must not claim that an option or add-on was booked unless the selected `service_id` itself represents that exact bookable service. If the user asks for an option that cannot be represented in the create payload, the safe v0.1.0 behavior is to stop, ask whether they want the base service instead, or hand off.
+- **Slot**: one bookable appointment opening in the v0.1.0 topology: a service, a provider, a start time, and a price. The start is carried twice: an absolute RFC 3339 instant in `starts_at` and the merchant-local wall-clock in `starts_at_local`.
+- **Customer**: the person the appointment is for, whether or not any payment is involved. Usually the same human as the user approving the mandate, but the roles are distinct: the user authorizes, the customer attends. Customer phone numbers use [E.164](https://www.itu.int/rec/T-REC-E.164) format ("+15555550100"); email addresses are plain [RFC 5322](https://www.rfc-editor.org/rfc/rfc5322) addresses. Both pass through to the platform, which is the enforcer of its own contact formats. Customer names are intentionally light: `display_name` is the human-readable name to show the user, while optional `given_name` and `family_name` are available only for platforms that require separate fields. OSBP does not enforce a legal-name match or reject nicknames such as "Alex" for "Alexander"; it must not invent missing name parts either. If an adapter needs separate name fields and the input is ambiguous, it fails closed or asks for clarification. If a name is supplied, final confirmation should show the merchant-visible name so transposed or surprising fields can be caught before create.
 - **Booking** and **Receipt**: the created appointment and OSBP's proof of creation. The platform's appointment record stays authoritative.
 
 The tool examples below show populated shapes. Full field definitions, optionality, and TypeScript types live in the repository's [schema document](https://github.com/osbp-dev/osbp/blob/main/docs/spec/v0.1.0/schema.md).
@@ -106,13 +115,13 @@ The mandate is the user's scoped authorization. In v0.1.0 it is unsigned JSON; t
 
 - `expires_at` is an absolute instant and must carry `Z` or an explicit UTC offset. Naked wall-clock strings are rejected: they would parse in the host's local timezone and could expire hours early or late.
 - `earliest_start` and `latest_end` are wall-clock strings in the merchant's local time, with no offset. They are compared against `Slot.starts_at_local` and `Slot.ends_at_local`, which follow the same convention.
-- `service_ids`, `provider_ids`, and `schedule_ids` are optional. A looser mandate authorizes a wider booking funnel; a stricter mandate pins one service, one provider, one schedule. The ids must constrain the actual create-ready ids used for `booking.create`, not display labels.
+- `service_ids`, `provider_ids`, and `schedule_ids` are optional. A looser mandate authorizes a wider booking funnel; a stricter mandate pins one service, one provider, one schedule. Omit one of these fields to leave that dimension unconstrained; an empty array is a present but empty allow-list and allows nothing. The ids must constrain the actual create-ready ids used for `booking.create`, not display labels.
 
 ### Money
 
 Every money-bearing value is a `Money` object, never a bare integer: `{ amount_minor?, currency, type?, display? }`. The money-bearing fields are `Service.price`, `ServiceOption.price`, `Slot.price`, `Policy.deposit`, `BookingMandate.max_price`, and `BookingMandate.max_extra_fee`.
 
-`amount_minor` is an integer in the currency's [ISO 4217](https://www.iso.org/iso-4217-currency-codes.html) minor unit. The minor-unit exponent varies by currency: USD and EUR use 2 places, JPY uses 0, KWD and BHD use 3. It is not always cents, so adapters scale by the currency's exponent, not a fixed factor of 100. `currency` is the ISO 4217 code and is required whenever a `Money` is present, so cross-currency comparisons fail closed instead of guessing. `type` defaults to `fixed` when an amount is present; the non-fixed values `insurance_dependent`, `quote_required`, and `unknown` mark a price with no fixed `amount_minor` known at read time. `display` is an optional locale-formatted string such as "$95.00": a best-effort, non-canonical hint. Agents should reformat `amount_minor` plus `currency` in the end user's locale rather than parse the `display` string, and implementations never parse it. Use `amount_minor` for arithmetic and mandate checks.
+`amount_minor` is an integer in the currency's [ISO 4217](https://www.iso.org/iso-4217-currency-codes.html) minor unit. The minor-unit exponent varies by currency: USD and EUR use 2 places, JPY, CLP, and VND use 0, and KWD, JOD, and TND use 3. It is not always cents, so adapters scale by the currency's exponent, not a fixed factor of 100. For any currency an adapter supports, the exponent must come from current ISO 4217 or CLDR currency data, or from a dated, reviewed snapshot of that data, rather than an unexplained local shortlist; a merchant currency whose exponent is unknown is not safe to onboard. `currency` is the ISO 4217 code and is required whenever a `Money` is present, so cross-currency comparisons fail closed instead of guessing. `type` defaults to `fixed` when an amount is present; the non-fixed values `insurance_dependent`, `quote_required`, and `unknown` mark a price with no fixed `amount_minor` known at read time. `display` is an optional locale-formatted string such as "$95.00": a best-effort, non-canonical hint. Agents should reformat `amount_minor` plus `currency` in the end user's locale rather than parse the `display` string, and implementations never parse it. Use `amount_minor` for arithmetic and mandate checks.
 
 Adapters must normalize the platform's native money representation into `amount_minor`: a platform that reports major units (for example 80 meaning $80.00) is scaled by the currency's minor-unit exponent, while a platform whose amounts are already minor units is passed through unscaled. Misreading the native unit yields prices wrong by a factor of the currency's exponent.
 
@@ -147,7 +156,7 @@ function wallClockToInstant(localISO: string, timeZone: string): string {
 }
 ```
 
-Where operating hours appear (`schedule_hours` on slots and locations), `day` is an ISO 8601 weekday number, 1 = Monday through 7 = Sunday, not the JS `getDay` convention (0 = Sunday); the adapter converts the platform's value. `open` and `close` are wall-clock "HH:MM" strings in the location's timezone. Durations (`Service.duration`, `Policy.cancellation_window`, `Policy.late_grace`) are ISO 8601 duration strings such as "PT45M", not bare integers.
+Where operating hours appear (`schedule_hours` on slots and locations), `day` is an ISO 8601 weekday number, 1 = Monday through 7 = Sunday, not the JS `getDay` convention (0 = Sunday); the adapter converts the platform's value. `open` and `close` are wall-clock "HH:MM" strings in the location's timezone. A `close` value earlier than `open` means the period continues into the following calendar day, for example `20:00` to `02:00`. Hours are typical display context only; `availability.find` is the authority for bookable time. Durations (`Service.duration`, `Policy.cancellation_window`, `Policy.late_grace`) are ISO 8601 duration strings such as "PT45M", not bare integers.
 
 ## Wire Format
 
@@ -211,7 +220,20 @@ Failure:
 }
 ```
 
-`problem.code` is a stable machine-readable string. The codes in use:
+`osbp_runtime` is optional diagnostics for agents and operators. It describes how this response was produced, not durable booking truth. In v0.1.0 the only defined value is `idempotency: "local_cache_replay"`, used when an adapter returns a settled result from local OSBP idempotency state instead of calling the booking platform again:
+
+```json
+{
+  "osbp_runtime": {
+    "idempotency": "local_cache_replay",
+    "message": "No platform create call was made; this result was replayed from local OSBP idempotency state."
+  }
+}
+```
+
+`problem.code` is the stable machine-readable contract. `problem.message` is explanatory English prose in v0.1.0, not a parsing target; branch on `problem.code` only.
+
+The codes in use:
 
 | Code | Meaning |
 |---|---|
@@ -230,16 +252,17 @@ Failure:
 | `currency_mismatch` | Selected price currency does not match the mandate cap currency; fail closed for new user approval |
 | `requires_payment_handoff` | Mandate does not allow a required payment or policy fee |
 | `requires_consultation_handoff` | Service requires a consultation/quote workflow that v0.1.0 cannot drive; route to `handoff.request` |
-| `requires_user_confirmation` | Final confirmation, payment requirement, or amount is unknown; fail closed before appointment creation |
+| `requires_user_confirmation` | Either final confirmation is required, or a payment requirement or amount is unknown. The final-confirmation challenge is retryable and includes an approval token; the fail-closed validator form is not retryable and carries no token |
 | `requires_verification` | Platform requires customer verification before booking (retryable) |
-| `verification_failed` | The submitted verification code was rejected (wrong or expired); retry the send and verify step |
+| `verification_failed` | The submitted verification code was rejected (wrong or expired); retry the send step and then retry `booking.create` with the new raw code |
 | `slot_taken` | The selected slot is no longer available (retryable) |
 | `idempotency_conflict` | Same `idempotency_key` reused with a different payload |
 | `booking_not_found` | No appointment matches the status query |
 | `booking_status_requires_verification` | Appointment history is gated behind a verification step that read tools cannot complete. Rely on the `booking.create` receipt or hand off |
 | `rate_limited` | Upstream returned HTTP 429. Back off and retry (retryable) |
-| `verification_not_supported` | Platform has no customer-verification step; `verification.send` and `verification.verify` do not apply |
 | `internal_adapter_error` | An adapter threw unexpectedly; the host caught it and recorded an audited Problem rather than leaking the throw |
+
+Adapters may emit additional adapter-specific codes, for example `missing_config` or `invalid_verification_purpose`. The codes above are the protocol-meaningful set.
 
 ## Tool Set
 
@@ -305,7 +328,7 @@ Returns candidate slots for one service, schedule, and date.
       "schedule_name": "Main Studio",
       "schedule_timezone": "America/Los_Angeles",
       "provider_id": "provider_123",
-      "provider_name": "Amy",
+      "provider_name": "Jordan Lee",
       "service_id": "service_123",
       "starts_at": "2026-05-05T20:00:00.000Z",
       "ends_at": "2026-05-05T21:00:00.000Z",
@@ -362,11 +385,13 @@ Returns payment and cancellation policy facts before `booking.create`.
 }
 ```
 
-`payment_requirement` is `"none" | "deposit" | "full_prepay" | "unknown"`. If it is `"deposit"` or `"full_prepay"`, v0.1.0 does not collect payment; `booking.create` returns `requires_payment_handoff`. If it is `"unknown"`, the server fails closed with `requires_user_confirmation`.
+`payment_requirement` is `"none" | "deposit" | "full_prepay" | "unknown"`. If it is `"deposit"` or `"full_prepay"`, v0.1.0 still does not collect payment. A booking may proceed only when the required amount is fixed and explicitly allowed by the mandate (`allow_policy_fee: true`); if the mandate also provides `max_extra_fee`, that cap must be same-currency and cover the amount. Otherwise `booking.create` returns `requires_payment_handoff` or another fail-closed `Problem`. If it is `"unknown"`, the server fails closed with `requires_user_confirmation`.
 
-`cancellation_fee` and `no_show_fee` are surfaced (each a `Money` object) when the platform exposes them, so an agent can show the user the conditional liability of a booking; even a free service can carry a no-show fee. They appear only when the platform reports a fee amount, and are omitted otherwise. OSBP v0.1.0 does not yet enforce or cap them through the mandate: that is roadmap, tied to payment composition.
+`cancellation_fee` and `no_show_fee` are surfaced (each a `Money` object) when the platform exposes them, so an agent can show the user the conditional liability of a booking; even a free service can carry a no-show fee. They appear only when the platform reports a fee amount, and are omitted otherwise. Agents must include any surfaced cancellation or no-show fee in the final user-visible approval summary, and must not describe those fees as capped by the `BookingMandate`. OSBP v0.1.0 does not yet enforce or cap them through the mandate: that is roadmap, tied to payment composition.
 
 The `organization` block surfaces the merchant's canonical id, since agents construct the mandate's `organization_id` from a read tool, and the timezone and currency the agent needs for wall-clock and price reasoning. `country` is an [ISO 3166-1 alpha-2](https://www.iso.org/iso-3166-country-codes.html) code.
+
+`verification_method` reports the method OSBP can identify for the platform flow. The v0.1.0 enum is `sms`, `email`, `none`, or `unknown`; future methods such as voice or messaging apps should be additive. Agents should not promise a more specific channel than OSBP reports.
 
 ### `verification.send`
 
@@ -402,7 +427,9 @@ Sends a verification code after `booking.create` returns `requires_verification`
 
 ### `verification.verify`
 
-Verifies a code for non-booking flows that require explicit pre-verification. For booking flows, do not call this: supply the raw code to `booking.create` directly, which verifies and consumes it during appointment creation.
+Verifies a code for non-booking flows that require explicit pre-verification. In the v0.1.0 booking flow, the agent normally supplies the raw code to `booking.create` after `requires_verification`, and the adapter lets the platform verify and consume it during appointment creation.
+
+Agents MUST NOT call this before `booking.create` when the adapter documents that pre-verification consumes the booking code, challenge, or session. Adapters that lack a safe independent verify primitive should reject this tool with an adapter-specific `Problem` rather than attempting to simulate it. If a platform has an independent pre-verification primitive that does not consume the booking attempt, the adapter may support it for non-booking flows and must document whether it applies to booking.
 
 **Input**
 
@@ -432,6 +459,8 @@ Verifies a code for non-booking flows that require explicit pre-verification. Fo
 ```
 
 The agent must ask the customer for the code out of band. OSBP must not invent, suppress, or bypass verification.
+
+Verification codes are sent by the merchant platform and may arrive in the platform's language and channel-specific wording. Agents should tell the user only the method OSBP reported and should not promise text-message wording, sender names, or language that OSBP did not receive.
 
 ### `booking.create`
 
@@ -464,6 +493,8 @@ Creates the appointment after user approval and mandate validation. Every bookin
   "customer": {
     "id": "customer_123",
     "display_name": "Jane Customer",
+    "given_name": "Jane",
+    "family_name": "Customer",
     "phone": "+15555550100",
     "email": "jane@example.com"
   },
@@ -477,7 +508,13 @@ Creates the appointment after user approval and mandate validation. Every bookin
 
 `date` and `time` are wall-clock values in the merchant's local time, taken from the selected slot's `starts_at_local`.
 
-The first call for a logical booking attempt omits `approval`. The reference adapter validates the mandate and slot, then the shared `@osbp/core` approval gate returns `requires_user_confirmation` with an exact booking summary and an adapter-issued `approval.token`, and does not call the platform create endpoint. The summary is user-facing prose, not a dump of protocol enum labels; for example, say "No upfront payment or deposit is required to book" instead of `payment_requirement: none`. After the user confirms that summary, retry with the same payload, same `idempotency_key`, and `approval: { "confirmed": true, "token": "<returned token>" }`.
+The first call for a logical booking attempt omits `approval`. The adapter validates the mandate and slot, then the approval gate returns `requires_user_confirmation` with an exact booking summary and an adapter-issued `approval.token`, and does not call the platform create endpoint. The summary is user-facing prose, not a dump of protocol enum labels; for example, say "No upfront payment or deposit is required to book" instead of `payment_requirement: none`. The message then carries a machine-directed retry instruction containing the token, formatted exactly as `approval.token="<token>"`; the agent must not display that token to the user. After the user confirms the summary, retry with the same payload, same `idempotency_key`, and `approval: { "confirmed": true, "token": "<returned token>" }`. The approval token is bound to the exact pending payload, including the `idempotency_key`, and to the resolved summary the user saw. If resolved facts such as price or policy text change before the retry, the adapter re-challenges with a fresh summary instead of accepting the old token. A token expires after a short TTL; the reference gate uses ten minutes. A leaked token cannot authorize a different booking, a different payload, or a second create under a new idempotency key.
+
+The same `requires_user_confirmation` code is also used by mandate validation when a booking cannot be safely bounded, such as unknown payment requirements or non-fixed amounts. That fail-closed form is terminal for v0.1.0: it is not retryable and carries no `approval.token`. Agents must not invent a token or retry it as a final-confirmation challenge; explain the blocking fact and route to `handoff.request`.
+
+If the booking input includes a customer name, the approval summary should show the merchant-visible name that will be sent to the platform. This catches common agent mistakes, such as swapped `given_name` / `family_name`, without creating a new OSBP-level identity gate. If the platform accepts "Alex Smith", OSBP should not fail the booking merely because the user's formal name might be "Alexander Smith"; if the platform rejects the contact/name pair, the adapter maps that platform rejection to a `Problem`.
+
+A failed approved attempt may still leave non-appointment side effects on the booking platform, such as a create-or-find customer record or a verification message, before the final appointment create succeeds or fails. The final-confirmation gate guarantees no platform appointment create happens before approval; it is not a promise that every failed attempt is invisible to the merchant system.
 
 `verification_code` is supplied only on retry after `requires_verification`.
 
@@ -501,7 +538,7 @@ The agent generates a fresh `idempotency_key` for each logical booking attempt a
 
 ### `booking.status`
 
-Reads the current appointment state. The `booking_id` is the one returned in the create receipt. When the platform exposes a direct appointment read (get-by-id), the adapter should query it so out-of-band changes such as cancellations are reflected. Answering from the local record of the create result is the fallback for platforms without one. The reference adapter answers OSBP-created bookings from its local idempotency record first, then reads the platform's get-by-id endpoint when a `booking_id` is supplied. When a platform's only readback is gated behind a verification step a read flow cannot complete, the adapter fails closed with `booking_status_requires_verification` rather than guessing. `customer` is accepted so an adapter that can read history may match by contact details.
+Reads appointment state. The `booking_id` is the one returned in the create receipt. When the platform exposes a direct appointment read, adapters should use it for status answers that claim current platform state. A local record may be used as a documented fallback or receipt-snapshot path, including immediately after an OSBP-created booking when the adapter's integration notes say the answer is cache-first; such a response must not pretend to be fresh platform state. When the platform's only readback is gated behind a verification step a read flow cannot complete, the adapter fails closed with `booking_status_requires_verification` rather than guessing. `customer` is accepted so an adapter that can read history may match by contact details.
 
 **Input**
 
@@ -568,11 +605,11 @@ Fallback when the adapter cannot safely complete the request. Use when:
 }
 ```
 
-`handoff.request` has no side effect: nothing is sent to the merchant. It returns a structured `requires_human` result for the agent to relay to the user, and the call is audited like any other. Merchant-side delivery of handoffs is out of scope for v0.1.0.
+`handoff.request` has no side effect: nothing is sent to the merchant. It returns a structured `requires_human` result for the agent to relay to the user, and the call is audited like any other schema-valid tool call. Merchant-side delivery of handoffs is out of scope for v0.1.0. The freeform `reason` and `message` fields must not carry customer names, contact details, or addresses; use opaque ids and non-identifying status text.
 
 ## Server Obligations
 
-What a conforming OSBP server must do on every mutation, regardless of platform.
+What a conforming OSBP server must do on every booking mutation, regardless of platform.
 
 ### Mandate Enforcement
 
@@ -593,7 +630,7 @@ OSBP idempotency lives in the local adapter cache. The audit log must store the 
 
 ### Audit
 
-Every tool call produces a local audit event carrying redacted input and result snapshots plus stable hashes for later correlation:
+Every schema-valid tool call that reaches the OSBP tool handler produces a local audit event carrying redacted input and result snapshots plus stable hashes for later correlation:
 
 ```json
 {
@@ -627,37 +664,43 @@ interface UpstreamMeta {
   api_version?: string // response-side API version echo when the platform sends one
   deprecation?: string // Deprecation header (RFC 9745), verbatim
   sunset?: string      // Sunset header (RFC 8594), verbatim HTTP-date
-  ratelimit?: Record<string, string> // RateLimit, RateLimit-Policy, X-RateLimit-*, keyed lowercase
+  ratelimit?: Record<string, string> // Retry-After, RateLimit, RateLimit-Policy, X-RateLimit-*, keyed lowercase
 }
 ```
 
 These are operator-observability fields, never agent-facing booking output, and they carry no customer data by construction.
 
-The server appends redacted JSONL audit events to `.osbp/audit/events.jsonl` by default; set `OSBP_AUDIT_LOG_PATH` to override. Audit events must redact customer contact details and verification codes. Checked-in traces should use audit aliases rather than raw local audit records.
+The server appends redacted JSONL audit events to `.osbp/audit/events.jsonl` by default; set `OSBP_AUDIT_LOG_PATH` to override. Audit events must redact structured customer contact and name fields, provider image URLs, verification codes, approval tokens, contact-shaped phone/email strings in free text, and known sensitive strings discovered from structured input. Freeform tool text cannot reliably identify arbitrary names or addresses that appear nowhere else in structured input, so agents must not put those details in `handoff.request` `reason` or `message`. Checked-in traces must use audit aliases rather than raw local audit records.
 
 ## Security and Privacy Considerations
 
-OSBP's threat model includes the agent itself. An agent can be over-eager, confused, or compromised, so authorization is enforced server-side against the user-approved mandate on every mutation; the agent is never trusted to self-limit. v0.1.0 mandates are unsigned JSON, which is a stated limitation, not a design goal: production mandate signing is a non-goal for this version and a requirement for any version that drops the "proof of concept" label.
+OSBP's threat model includes the agent itself. An agent can be over-eager, confused, or compromised, so booking-create authorization is enforced server-side against the user-approved mandate; the agent is never trusted to self-limit. v0.1.0 mandates are unsigned JSON, which is a stated limitation, not a design goal: production mandate signing is a non-goal for this version and a requirement for any version that drops the "proof of concept" label. Verification tools are side-effecting but are not mandate-gated in v0.1.0; the limitation is called out below.
 
+- **Durable secrets stay server-side.** Anything placed in a prompt, tool input, tool result, `Problem.message`, or agent-facing transcript can be shown to the user, retained by the host, or copied into a debug session. Durable secrets such as platform API keys, OAuth bearer tokens, refresh tokens, merchant dashboard credentials, and platform-private override flags must stay in adapter/server config and must never be routed through the agent.
+- **Attempt-scoped capabilities are tolerated, not trusted.** Approval tokens and verification codes may pass through the agent only to complete the v0.1.0 booking loop. They must be scoped as narrowly as the platform allows, one-time-use where possible, short-lived, redacted from audit events and published traces, and insufficient by themselves to bypass mandate validation. Where a platform cannot provide one of those properties, for example a verification code scoped to a merchant rather than one booking attempt, the adapter documentation must say so.
+- **Correlation identifiers are not durable secrets.** Mandate ids, idempotency keys, booking ids, receipt ids, and audit event ids exist so the user, adapter, and operator can correlate one attempt. They may appear in receipts, audit events, and agent-visible output. Their sensitivity inherits the platform's readback and challenge semantics: where a platform offers unauthenticated by-id readback or keys a verification purpose to an appointment id, treat booking ids as sensitive in published traces and logs even though they are not platform credentials.
 - **Verification is sacred.** OSBP must not invent, suppress, or bypass customer verification. Raw codes pass through to the platform and are never persisted; the audit log records that verification happened and by which method, never the code.
-- **Audit events are redacted.** Customer contact details and verification codes are redacted before writing. Checked-in traces use audit aliases rather than raw local records.
+- **Audit events are redacted.** Structured customer contact and name fields, provider image URLs, verification codes, approval tokens, contact-shaped phone/email strings in free text, and known sensitive strings discovered from structured input are redacted before writing. Freeform handoff text must not carry customer names, contact details, or addresses that are not also present in structured fields. Checked-in traces must use audit aliases rather than raw local records.
 - **Fail closed.** Unknown payment requirements, unknown fee amounts, and ambiguous platform states refuse or hand off rather than proceed. A mutation that cannot be explained to the user does not happen.
 - **No platform overrides.** OSBP must never set platform-private flags that skip availability, verification, or payment checks, even when the platform exposes them.
-- **Caller identity is self-declared in v0.1.0.** When OSBP calls the booking platform it identifies itself with self-declared HTTP headers only: a `User-Agent` (for example `OSBP/0.1.0 reference-backend/0.1.0 node/22`) and an `x-osbp-source` marker. This is not authentication, and a platform must not treat either as proof of origin. v0.1.0 propagates no verifiable agent or end-user identity to the platform, and the mandate is validated structurally, not cryptographically. Verifiable request signing (for example HTTP Message Signatures, RFC 9421) and OAuth resource-server authorization for a remote MCP server are roadmap items, not v0.1.0 guarantees.
-- **No circumventing platform fairness controls.** Beyond not overriding checks, OSBP must never bypass, disable, or evade a platform's rate limits, queueing, per-user or per-account booking limits, waitlists, or anti-bot controls. OSBP traffic is subject to the same allocation and abuse controls the platform applies to native users. In v0.1.0 this is a conduct requirement, not an enforced one, since caller identity is self-declared: it states the conformance bar that verifiable identity later makes checkable.
+- **Caller identity is self-declared in v0.1.0.** When OSBP calls the booking platform it identifies itself with self-declared HTTP headers only: a `User-Agent` (for example `OSBP/0.1.0 reference-backend/0.1.0 node/24`) and an `x-osbp-source` marker. This is not authentication, and a platform must not treat either as proof of origin. v0.1.0 propagates no verifiable agent or end-user identity to the platform, and the mandate is validated structurally, not cryptographically. Verifiable request signing (for example HTTP Message Signatures, RFC 9421) and OAuth resource-server authorization for a remote MCP server are roadmap items, not v0.1.0 guarantees.
+- **No circumventing platform fairness controls.** Beyond not overriding checks, OSBP must never bypass, disable, or evade a platform's rate limits, queueing, per-user or per-account booking limits, waitlists, or anti-bot controls. OSBP traffic is subject to the same allocation, rate-limit, and safety controls the platform applies to native users. In v0.1.0 this is a conduct requirement, not an enforced one, since caller identity is self-declared: it states the conformance bar that verifiable identity later makes checkable.
 - **Payment authority is a separate layer.** OSBP authorizes the booking, not the payment. A `BookingMandate` is designed to compose alongside payment-mandate protocols; when a booking requires payment, OSBP hands off instead of handling the charge.
 
 ## Known Limitations (Proof of Concept)
 
 v0.1.0 proves the authorization loop, not a production trust surface. These limitations are deliberate, and naming them is part of the contract: an integrator must not mistake the proof of concept for a hardened system. The incentive risks below are real even though nothing is exploiting them yet, and several are exactly the parts an adversarial agent or a careless integration would lean on.
 
+- **Narrow appointment topology.** v0.1.0 models a single-attendee, single-provider appointment slot with no exposed capacity, room/equipment allocation, route stop, recurring series, waitlist position, or class roster. An adapter for a platform whose real booking object depends on one of those dimensions must fail closed or hand off rather than flattening the missing dimension into a misleading v0.1.0 slot.
 - **Idempotency is local and ephemeral.** Deduplication of `booking.create` lives in an in-process cache backed by a local file, keyed by `idempotency_key` and payload-hashed. It does not survive a multi-instance deployment, a cross-session replay, or an adapter restart with a cleared store. A production deployment needs durable, platform-enforced idempotency; until then a buggy or adversarial caller can produce duplicate bookings the local cache cannot catch.
-- **Final confirmation is adapter-side.** The shared `@osbp/core` approval gate (`requireApproval`, used by the reference adapter) requires a short-lived approval token before the platform appointment-create endpoint is called, which prevents a single accidental `booking.create` call from booking immediately. It cannot prove the human saw or approved the summary, because the token still flows through the agent. A production deployment needs a host/server confirmation primitive outside the agent's unilateral control.
-- **Verification-code pass-through is a platform accommodation, not a recommended pattern.** The reference booking flow has the agent relay a raw SMS or email code through `booking.create`. OSBP never persists the code, and the audit log records only that verification happened and by which method. But routing a raw human-delivered code through the agent at all is a concession to a platform's current API, not a design to copy. Out-of-band or signed verification, where the agent never handles the raw code, is the intended direction.
+- **Final confirmation is adapter-side.** The shared `@osbp/core` approval gate (`requireApproval`, used by the reference adapter) requires a short-lived approval token before the platform appointment-create endpoint is called, which prevents a single accidental `booking.create` call from booking immediately. It cannot prove the human saw or approved the summary, because the token still flows through the agent. The user-facing summary and the machine-directed retry instruction also share one `Problem.message`, so v0.1.0 relies on agent guidance to show only the summary; audit logs and published traces redact tokens, but a live chat can still expose them if an agent pastes the whole message. Because the token flows through the agent and a mandate is reusable until `expires_at`, a compromised agent can self-approve repeated creates within the mandate's scope. v0.1.0 has no per-mandate booking count cap. A production deployment needs a host/server confirmation primitive outside the agent's unilateral control.
+- **Verification-code pass-through is a platform accommodation, not a recommended pattern.** The reference booking flow has the agent relay a raw SMS or email code through `booking.create`. OSBP never persists the code, and the audit log records only that verification happened and by which method. But routing a raw human-delivered code through the agent at all is a concession to a platform's current API, not a design to copy. Some platforms scope codes to a merchant and customer rather than to one booking attempt, so a leaked code remains useful for the platform TTL. Out-of-band or signed verification, where the agent never handles the raw code, is the intended direction.
+- **Merchant-supplied text is untrusted display data.** Service names, provider names, organization names, cancellation notes, and receipt text may originate in a merchant-controlled booking platform and flow into the agent context. v0.1.0 does not authenticate, sanitize, fence, or label those strings as untrusted content. Agents and hosts must treat them as display data, not instructions; a production host should add stronger tool-result labeling or content isolation.
+- **`verification.send` is not mandate-gated.** The tool can dispatch a real SMS or email to a caller-supplied contact and is bounded only by platform rate-limit and safety controls in v0.1.0. The protocol does not yet bind the send destination to the customer of a pending gated booking attempt; a production version needs that binding or a mandate-scoped contact allowlist.
 - **No slot holds: booking a scarce slot is a first-come race.** OSBP holds no slot and the platform is the system of record, so the first completed `booking.create` wins. When provider time is scarce a fast agent can win that race against a human on native UI, and it is sharper mid-booking when a deposit or verification step sits between selecting a slot and confirming it. v0.1.0 has no hold or lease, and no optimistic-concurrency token (`availability_snapshot_id`) to make a stale attempt fail cleanly. These are roadmap items (contention controls).
-- **No fairness, fee-cap, or signed-receipt mechanisms.** v0.1.0 has no allocation-policy disclosure, no conformance tiers, and no handoff-abuse or unknown-rate metrics. An agent that repeatedly probes availability or fires handoffs is neither rate-limited nor measured by the protocol. Receipts and availability snapshots are unsigned, so neither the user nor the merchant gets a tamper-evident record of what was authorized or offered.
-- **Cancellation and no-show fees are surfaced but not capped by the mandate.** `Policy.cancellation_fee` and `Policy.no_show_fee` let an agent show the conditional liability of a booking, but the mandate does not yet cap them or require reapproval when they change. A booking can carry a fee the user was shown without the mandate ever bounding it. Today the protection is disclosure, not enforcement.
-- **`provider_image_url` is a likeness and is not anonymized.** The field is a URL to a provider's display image, frequently a photograph of a named person. OSBP surfaces it on every `Slot` and does not redact or alias it. A redacted trace omits it only because the redactor's explicit allowlist does not list it, a fragile protection: a raw availability response, or an integrator who widens the trace allowlist, exposes a named person's image URL. Treat it as personal data when deciding what a trace, log, or downstream store may contain.
+- **No fairness, fee-cap, or signed-receipt mechanisms.** v0.1.0 has no allocation-policy disclosure, no conformance tiers, and no handoff-volume or unknown-rate metrics. An agent that repeatedly probes availability or fires handoffs is neither rate-limited nor measured by the protocol. Receipts and availability snapshots are unsigned, so neither the user nor the merchant gets a tamper-evident record of what was authorized or offered.
+- **Cancellation and no-show fees are surfaced but not capped by the mandate.** `Policy.cancellation_fee` and `Policy.no_show_fee` let an agent show the conditional liability of a booking, but the mandate does not yet cap them or require reapproval when they change. A booking can carry a fee the user was shown without the mandate ever bounding it. Today the protection is explicit disclosure in final approval, not enforcement.
+- **`provider_image_url` is a likeness and is not anonymized in tool results.** The field is a URL to a provider's display image, frequently a photograph of a named person. OSBP surfaces it on every `Slot` and does not redact or alias it in ordinary tool responses. The local audit logger redacts this key, and the checked-in trace redactor omits it by explicit allowlist. A raw availability response, or an integrator who widens a trace allowlist, exposes a named person's image URL. Treat it as personal data when deciding what a trace, log, or downstream store may contain.
 
 ## Implementing OSBP
 
@@ -668,9 +711,14 @@ The integrator path: the contract to implement, how to run the reference, and wh
 OSBP reaches a booking platform through one interface. Implementing OSBP for your platform means implementing these seven methods:
 
 ```ts
+interface AdapterRuntimeDiagnostics {
+  idempotency?: "local_cache_replay"
+  message?: string
+}
+
 type AdapterResult<T> =
-  | { ok: true; value: T }
-  | { ok: false; problem: Problem }
+  | { ok: true; value: T; osbp_runtime?: AdapterRuntimeDiagnostics }
+  | { ok: false; problem: Problem; osbp_runtime?: AdapterRuntimeDiagnostics }
 
 interface BookingAdapter {
   // Static platform identity and most-recent upstream response metadata,
@@ -699,7 +747,9 @@ readonly platform: PlatformIdentity = { vendor: "osbp-reference-backend", api_ve
 
 `api_version` is the exact native pin the adapter sends or encodes: a version request header value (for example `Square-Version: 2026-05-21`), a media-type version parameter, or the version segment of the base URL for path-versioned APIs. When the platform supports request-side pinning, the adapter MUST send the pin on every request and MUST NOT rely on account or dashboard defaults, which can change outside the adapter's control. When the platform exposes no version mechanism, the adapter SHOULD record the documented spec version (for example OpenAPI `info.version`), its source, and the retrieval date in a source comment; that is build-time provenance, not a runtime signal, and drift detection falls to the read-only smoke.
 
-For each upstream response the adapter SHOULD capture, into the audit channel: the method and path (query strings omitted, contact-bearing path segments redacted), the HTTP status, the `Server` header, the first header whose name contains `request-id`, any response-side API version echo, the `Deprecation` header ([RFC 9745](https://www.rfc-editor.org/rfc/rfc9745)), the `Sunset` header ([RFC 8594](https://www.rfc-editor.org/rfc/rfc8594)), and RateLimit headers. The `Server` value is an infrastructure fingerprint, frequently the CDN or edge-proxy build rather than the platform application, and MUST NOT be presented as an application or API version.
+Contract-drift monitoring is adapter-owned and platform-native, not a universal OSBP protocol shape. An adapter SHOULD add a scheduled drift monitor only when the platform offers a stable, official, non-PII-bearing contract source to diff and a clear operator action when the diff changes. A public OpenAPI document, a dated version echo, a generated client, a path version, an evolvable-enum policy, and a closed SDK all imply different monitoring strategies. Do not require an OpenAPI baseline or watcher from adapters whose platforms cannot support one, and do not substitute scraping, dashboard automation, or private endpoints for an official contract source.
+
+For each upstream response the adapter SHOULD capture, into the audit channel: the method and path (query strings omitted, contact-bearing path segments redacted), the HTTP status, the `Server` header, the first header whose name contains `request-id`, any response-side API version echo, the `Deprecation` header ([RFC 9745](https://www.rfc-editor.org/rfc/rfc9745)), the `Sunset` header ([RFC 8594](https://www.rfc-editor.org/rfc/rfc8594)), and `Retry-After` / RateLimit headers. The `Server` value is an infrastructure fingerprint, frequently the CDN or edge-proxy build rather than the platform application, and MUST NOT be presented as an application or API version.
 
 If a response carries `Deprecation` or `Sunset`, the adapter MUST surface it loudly on the operator channel, at least once per endpoint per process, so an operator learns the upstream is retiring before it breaks. A lifecycle announcement is not a failure: the call succeeded, so it MUST NOT become a `Problem` and MUST NOT change agent-facing output.
 
@@ -737,7 +787,7 @@ The reference adapter in the repository implements this pattern; its internal `c
 
 ### Getting Started
 
-- [Reference implementation](https://github.com/osbp-dev/osbp): TypeScript monorepo with the protocol core, the credential-free synthetic reference backend, the conformance kit, an adapter starter, the local stdio MCP server, and the worked Openings adapter.
+- [Reference implementation](https://github.com/osbp-dev/osbp): TypeScript monorepo with the protocol core, the credential-free synthetic reference backend, the conformance kit, and an adapter starter.
 - [Run the demo](https://github.com/osbp-dev/osbp/tree/main/packages/reference-backend): `npm run demo` books a synthetic appointment inside a `BookingMandate`, then shows the guardrail rejecting an over-cap booking, with no account or secrets.
 - [Trace gallery](https://github.com/osbp-dev/osbp/tree/main/traces): replayable credential-free reference traces, from user request through mandate, tool calls, guardrails, and receipt.
 

@@ -1,21 +1,22 @@
 {
   "trace_id": "trace_openings_v0_1_0_create_001",
   "protocol_version": "0.1.0",
-  "generated_at": "2026-06-18T05:00:00.597Z",
+  "generated_at": "2026-07-09T00:53:34.414Z",
   "source": "osbp-v0.1.0-local",
   "redaction": {
-    "live_fixture_ids": "aliased",
+    "live_business_ids": "aliased",
     "customer_phone": "redacted",
+    "customer_name": "redacted",
     "verification_code": "redacted"
   },
-  "user_request": "Book me one safe test appointment at the Openings demo salon. Ask for final approval before booking.",
+  "user_request": "Book one controlled live appointment at the configured Openings business. Ask for final approval before booking.",
   "mandate": {
     "id": "mnd_openings_v0_1_0_create_001",
-    "expires_at": "2026-06-19T05:00:00.597Z",
+    "expires_at": "2026-07-10T00:53:34.414Z",
     "allowed_actions": [
       "booking.create"
     ],
-    "organization_id": "openings_demo_salon",
+    "organization_id": "openings_business",
     "service_ids": [
       "service_primary"
     ],
@@ -25,8 +26,8 @@
     "schedule_ids": [
       "schedule_selected"
     ],
-    "earliest_start": "2026-06-19T10:00:00",
-    "latest_end": "2026-06-19T23:59:00",
+    "earliest_start": "2026-07-10T10:45:00",
+    "latest_end": "2026-07-10T23:59:00",
     "max_price": {
       "amount_minor": 4500,
       "currency": "USD"
@@ -62,7 +63,7 @@
       "input": {
         "service_id": "service_primary",
         "schedule_id": "schedule_primary",
-        "date": "2026-06-19"
+        "date": "2026-07-10"
       },
       "output": {
         "slot_count": 29,
@@ -72,8 +73,8 @@
             "schedule_id": "schedule_selected",
             "provider_id": "provider_selected",
             "service_id": "service_primary",
-            "starts_at": "2026-06-19T17:00:00.000Z",
-            "starts_at_local": "2026-06-19T10:00:00",
+            "starts_at": "2026-07-10T17:45:00.000Z",
+            "starts_at_local": "2026-07-10T10:45:00",
             "schedule_timezone": "America/Los_Angeles",
             "price": {
               "amount_minor": 4500,
@@ -87,8 +88,8 @@
             "schedule_id": "schedule_selected",
             "provider_id": "provider_selected",
             "service_id": "service_primary",
-            "starts_at": "2026-06-19T17:45:00.000Z",
-            "starts_at_local": "2026-06-19T10:45:00",
+            "starts_at": "2026-07-10T18:30:00.000Z",
+            "starts_at_local": "2026-07-10T11:30:00",
             "schedule_timezone": "America/Los_Angeles",
             "price": {
               "amount_minor": 4500,
@@ -102,8 +103,8 @@
             "schedule_id": "schedule_selected",
             "provider_id": "provider_selected",
             "service_id": "service_primary",
-            "starts_at": "2026-06-19T18:30:00.000Z",
-            "starts_at_local": "2026-06-19T11:30:00",
+            "starts_at": "2026-07-10T19:15:00.000Z",
+            "starts_at_local": "2026-07-10T12:15:00",
             "schedule_timezone": "America/Los_Angeles",
             "price": {
               "amount_minor": 4500,
@@ -117,8 +118,8 @@
             "schedule_id": "schedule_selected",
             "provider_id": "provider_selected",
             "service_id": "service_primary",
-            "starts_at": "2026-06-19T19:15:00.000Z",
-            "starts_at_local": "2026-06-19T12:15:00",
+            "starts_at": "2026-07-10T20:00:00.000Z",
+            "starts_at_local": "2026-07-10T13:00:00",
             "schedule_timezone": "America/Los_Angeles",
             "price": {
               "amount_minor": 4500,
@@ -132,8 +133,8 @@
             "schedule_id": "schedule_selected",
             "provider_id": "provider_selected",
             "service_id": "service_primary",
-            "starts_at": "2026-06-19T20:45:00.000Z",
-            "starts_at_local": "2026-06-19T13:45:00",
+            "starts_at": "2026-07-10T20:45:00.000Z",
+            "starts_at_local": "2026-07-10T13:45:00",
             "schedule_timezone": "America/Los_Angeles",
             "price": {
               "amount_minor": 4500,
@@ -164,18 +165,19 @@
         "service_id": "service_primary",
         "schedule_id": "schedule_selected",
         "provider_id": "provider_selected",
-        "date": "2026-06-19",
-        "time": "10:00",
+        "date": "2026-07-10",
+        "time": "10:45",
         "customer": {
-          "phone": "[redacted]"
+          "phone": "[redacted]",
+          "display_name": "[redacted]"
         },
         "mandate": {
           "id": "mnd_openings_v0_1_0_create_001",
-          "expires_at": "2026-06-19T05:00:00.597Z",
+          "expires_at": "2026-07-10T00:53:34.414Z",
           "allowed_actions": [
             "booking.create"
           ],
-          "organization_id": "openings_demo_salon",
+          "organization_id": "openings_business",
           "service_ids": [
             "service_primary"
           ],
@@ -185,8 +187,62 @@
           "schedule_ids": [
             "schedule_selected"
           ],
-          "earliest_start": "2026-06-19T10:00:00",
-          "latest_end": "2026-06-19T23:59:00",
+          "earliest_start": "2026-07-10T10:45:00",
+          "latest_end": "2026-07-10T23:59:00",
+          "max_price": {
+            "amount_minor": 4500,
+            "currency": "USD"
+          },
+          "allow_policy_fee": false,
+          "max_extra_fee": {
+            "amount_minor": 0,
+            "currency": "USD"
+          }
+        }
+      },
+      "output": {
+        "problem": {
+          "code": "requires_user_confirmation",
+          "message": "Final user approval is required before booking. User-facing approval summary: Book Short Haircut for [redacted] priced at $45.00 on 2026-07-10 at 10:45 merchant-local time with the selected provider at the selected location. Policy: No upfront payment or deposit is required to book. Agent retry instruction: If the user approves, retry the same booking request with approval.confirmed=true and approval.token=\"[redacted]\".",
+          "retryable": true
+        }
+      }
+    },
+    {
+      "tool": "osbp_booking_create",
+      "input": {
+        "idempotency_key": "idem_openings_v0_1_0_create_001",
+        "service_id": "service_primary",
+        "schedule_id": "schedule_selected",
+        "provider_id": "provider_selected",
+        "date": "2026-07-10",
+        "time": "10:45",
+        "customer": {
+          "phone": "[redacted]",
+          "display_name": "[redacted]"
+        },
+        "approval": {
+          "confirmed": true,
+          "token": "[redacted]"
+        },
+        "mandate": {
+          "id": "mnd_openings_v0_1_0_create_001",
+          "expires_at": "2026-07-10T00:53:34.414Z",
+          "allowed_actions": [
+            "booking.create"
+          ],
+          "organization_id": "openings_business",
+          "service_ids": [
+            "service_primary"
+          ],
+          "provider_ids": [
+            "provider_selected"
+          ],
+          "schedule_ids": [
+            "schedule_selected"
+          ],
+          "earliest_start": "2026-07-10T10:45:00",
+          "latest_end": "2026-07-10T23:59:00",
           "max_price": {
             "amount_minor": 4500,
             "currency": "USD"
@@ -200,9 +256,9 @@
       },
       "output": {
         "receipt": {
-          "id": "receipt_idem_openings_v0_1_0_create_001",
+          "id": "receipt_openings_create_001",
           "booking_id": "booking_1",
-          "text": "Booked Short Haircut on 2026-06-19 at 10:00. Openings appointment id: booking_1."
+          "text": "Booked Short Haircut on 2026-07-10 at 10:45. Openings appointment id: booking_1."
         }
       }
     },
@@ -221,10 +277,10 @@
           "service_id": "service_primary",
           "schedule_id": "schedule_selected",
           "provider_id": "provider_selected",
-          "starts_at": "2026-06-19T17:00:00.000Z",
-          "starts_at_local": "2026-06-19T10:00:00",
+          "starts_at": "2026-07-10T17:45:00.000Z",
+          "starts_at_local": "2026-07-10T10:45:00",
           "schedule_timezone": "America/Los_Angeles",
-          "customer_id": "customer_1"
+          "customer_id": "customer_configured"
         }
       }
     }
@@ -234,8 +290,8 @@
     "schedule_id": "schedule_selected",
     "provider_id": "provider_selected",
     "service_id": "service_primary",
-    "starts_at": "2026-06-19T17:00:00.000Z",
-    "starts_at_local": "2026-06-19T10:00:00",
+    "starts_at": "2026-07-10T17:45:00.000Z",
+    "starts_at_local": "2026-07-10T10:45:00",
     "schedule_timezone": "America/Los_Angeles",
     "price": {
       "amount_minor": 4500,
@@ -248,11 +304,12 @@
     "service_id": "service_primary",
     "payment_requirement": "none"
   },
-  "final_approval_text": "Approve booking Short Haircut at 2026-06-19T10:00:00 with provider_selected?",
+  "final_approval_text": "Book Short Haircut for [redacted] priced at $45.00 on 2026-07-10 at 10:45 merchant-local time with the selected provider at the selected location. Policy: No upfront payment or deposit is required to book.",
   "audit_event_ids": [
     "aud_service_describe_001",
     "aud_availability_find_001",
     "aud_policy_explain_001",
+    "aud_booking_create_preflight_001",
     "aud_booking_create_001",
     "aud_booking_status_001"
   ],
@@ -290,15 +347,22 @@
     "customer_ids": {
       "count": 1,
       "aliases": [
-        "customer_1"
+        "customer_configured"
       ]
+    }
+  },
+  "booking_create_preflight": {
+    "problem": {
+      "code": "requires_user_confirmation",
+      "message": "Final user approval is required before booking. User-facing approval summary: Book Short Haircut for [redacted] priced at $45.00 on 2026-07-10 at 10:45 merchant-local time with the selected provider at the selected location. Policy: No upfront payment or deposit is required to book. Agent retry instruction: If the user approves, retry the same booking request with approval.confirmed=true and approval.token=\"[redacted]\".",
+      "retryable": true
     }
   },
   "booking_create": {
     "receipt": {
-      "id": "receipt_idem_openings_v0_1_0_create_001",
+      "id": "receipt_openings_create_001",
       "booking_id": "booking_1",
-      "text": "Booked Short Haircut on 2026-06-19 at 10:00. Openings appointment id: booking_1."
+      "text": "Booked Short Haircut on 2026-07-10 at 10:45. Openings appointment id: booking_1."
     }
   },
   "booking_status": {
@@ -307,14 +371,14 @@
     "service_id": "service_primary",
     "schedule_id": "schedule_selected",
     "provider_id": "provider_selected",
-    "starts_at": "2026-06-19T17:00:00.000Z",
-    "starts_at_local": "2026-06-19T10:00:00",
+    "starts_at": "2026-07-10T17:45:00.000Z",
+    "starts_at_local": "2026-07-10T10:45:00",
     "schedule_timezone": "America/Los_Angeles",
-    "customer_id": "customer_1"
+    "customer_id": "customer_configured"
   },
   "receipt": {
-    "id": "receipt_idem_openings_v0_1_0_create_001",
+    "id": "receipt_openings_create_001",
     "booking_id": "booking_1",
-    "text": "Booked Short Haircut on 2026-06-19 at 10:00. Openings appointment id: booking_1."
+    "text": "Booked Short Haircut on 2026-07-10 at 10:45. Openings appointment id: booking_1."
   }
 }
